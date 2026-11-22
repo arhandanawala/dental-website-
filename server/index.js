@@ -347,6 +347,9 @@ const PRIVATE_PREFIXES = [
   "/metadata.json",
   "/package.json",
   "/package-lock.json",
+  "/worker",
+  "/scripts",
+  "/wrangler.jsonc",
 ];
 app.use((req, res, next) => {
   const p = req.path.toLowerCase();
