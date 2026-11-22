@@ -28,13 +28,13 @@
 
 .mola-orb-core {
   position: relative;
-  flex: 0 0 66px;
-  width: 66px;
-  height: 66px;
+  flex: 0 0 64px;
+  width: 64px;
+  height: 64px;
   border: 1px solid rgba(204, 255, 255, 0.66);
   border-radius: 50%;
   background: radial-gradient(circle at 32% 27%, #d9ffff 0 5%, #75edf2 14%, #24a3b1 38%, #06363d 68%, #011f23 100%);
-  box-shadow: 0 0 0 7px rgba(36, 163, 177, 0.08), 0 0 28px rgba(36, 163, 177, 0.76), 0 14px 34px rgba(1, 31, 35, 0.4);
+  box-shadow: 0 0 0 7px rgba(36, 163, 177, 0.08), 0 0 28px rgba(36, 163, 177, 0.72), 0 14px 34px rgba(1, 31, 35, 0.4);
   transition: transform 180ms ease, box-shadow 180ms ease;
   animation: mola-orb-breathe 2.4s ease-in-out infinite;
 }
@@ -67,24 +67,24 @@
 }
 
 .mola-orb-prompt {
-  max-width: 138px;
-  padding: 9px 11px;
-  border: 1px solid rgba(36, 163, 177, 0.25);
+  max-width: 158px;
+  padding: 9px 13px;
+  border: 1px solid rgba(36, 163, 177, 0.35);
   border-radius: 12px;
-  background: rgba(1, 31, 35, 0.92);
-  box-shadow: 0 10px 28px rgba(1, 31, 35, 0.2);
+  background: rgba(1, 31, 35, 0.94);
+  box-shadow: 0 10px 28px rgba(1, 31, 35, 0.24);
   color: #e9fcfd;
   font-size: 12px;
-  font-weight: 650;
-  line-height: 1.2;
-  opacity: 0.88;
+  font-weight: 600;
+  line-height: 1.25;
+  opacity: 0.96;
   transform-origin: right center;
   transition: opacity 180ms ease, transform 180ms ease, border-color 180ms ease;
 }
 
 .mola-bubble:hover .mola-orb-core {
-  box-shadow: 0 0 0 9px rgba(36, 163, 177, 0.12), 0 0 38px rgba(79, 235, 244, 0.95), 0 16px 38px rgba(1, 31, 35, 0.48);
-  transform: scale(1.08);
+  box-shadow: 0 0 0 9px rgba(36, 163, 177, 0.14), 0 0 38px rgba(79, 235, 244, 0.95), 0 16px 38px rgba(1, 31, 35, 0.48);
+  transform: scale(1.06);
 }
 
 .mola-bubble:hover .mola-orb-prompt {
@@ -93,79 +93,307 @@
   transform: translateX(-3px);
 }
 
-.mola-panel {
-  width: min(340px, calc(100vw - 32px));
-  background: rgba(8, 14, 16, 0.92);
-  border: 1px solid rgba(36, 163, 177, 0.35);
+/* ---- Dedicated Microphone Permission Popup ---- */
+.mola-mic-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(1, 20, 24, 0.68);
+  backdrop-filter: blur(8px);
+  animation: mola-fade 0.2s ease;
+}
+
+.mola-mic-modal {
+  width: min(420px, 100%);
+  background: #07191d;
+  color: #edf7f9;
+  border: 1px solid rgba(36, 163, 177, 0.42);
+  border-radius: 22px;
+  padding: 26px 24px 20px;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  letter-spacing: normal;
+  word-spacing: normal;
+}
+
+.mola-mic-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(36, 163, 177, 0.16);
+  border: 1px solid rgba(117, 237, 242, 0.45);
+  color: #75edf2;
+}
+
+.mola-mic-title {
+  margin: 0 0 8px;
+  font-family: Sora, "Helvetica Neue", system-ui, sans-serif;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+}
+
+.mola-mic-copy {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #b7cfd4;
+}
+
+.mola-mic-note {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(36, 163, 177, 0.12);
+  border: 1px solid rgba(36, 163, 177, 0.28);
+  font-size: 12px;
+  line-height: 1.45;
+  color: #9be8ef;
+}
+
+.mola-mic-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---- Live Assistant Panel ---- */
+.mola-voice-root .mola-panel {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  overflow: visible;
+  width: min(364px, calc(100vw - 24px));
+  max-height: calc(100vh - 36px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(8, 16, 19, 0.96);
+  border: 1px solid rgba(36, 163, 177, 0.38);
   border-radius: 24px;
-  padding: 16px 16px 14px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  padding: 14px 16px 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(16px);
 }
 
-.mola-orb-wrap {
-  width: 220px;
-  height: 220px;
-  margin: 0 auto 8px;
+.mola-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
 }
 
-.mola-status {
-  text-align: center;
-  font-size: 13px;
-  color: #9db4bc;
-  min-height: 38px;
-  margin: 4px 0 10px;
+.mola-close-x {
+  border: 0;
+  background: rgba(255, 255, 255, 0.06);
+  color: #b7ccd3;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mola-close-x:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.mola-orb-wrap {
+  width: 148px;
+  height: 148px;
+  margin: 0 auto 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .mola-caption {
   text-align: center;
-  font-size: 12px;
+  font-size: 11.5px;
   color: #7fd7e0;
+  margin-bottom: 4px;
+}
+
+.mola-status {
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: #c2d7dd;
+  min-height: 32px;
+  margin: 2px 0 8px;
+}
+
+.mola-status.is-error {
+  color: #ffb8c0;
+  background: rgba(138, 39, 53, 0.25);
+  border: 1px solid rgba(255, 138, 152, 0.35);
+  border-radius: 12px;
+  padding: 9px 11px;
+}
+
+.mola-saved-pill {
+  margin: 0 0 8px;
+  padding: 7px 11px;
+  border-radius: 10px;
+  background: rgba(61, 214, 140, 0.14);
+  border: 1px solid rgba(61, 214, 140, 0.38);
+  color: #8bf0bf;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.mola-transcript {
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 0 0 10px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(2, 11, 14, 0.72);
+  border: 1px solid rgba(36, 163, 177, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.mola-tline {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mola-trole {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7fd7e0;
+}
+
+.mola-tline.is-caller .mola-trole {
+  color: #a4b8bf;
+}
+
+.mola-tline.is-system .mola-trole {
+  color: #3dd68c;
+}
+
+.mola-ttext {
+  color: #edf7f9;
+}
+
+.mola-text-form {
+  display: flex;
+  gap: 6px;
   margin-bottom: 10px;
+}
+
+.mola-text-input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(155, 232, 239, 0.28);
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.mola-text-input::placeholder {
+  color: #87a6ae;
+}
+
+.mola-text-input:focus {
+  border-color: #24a3b1;
+}
+
+.mola-text-send {
+  border: 0;
+  border-radius: 999px;
+  padding: 0 14px;
+  background: #24a3b1;
+  color: #031518;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mola-text-send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .mola-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .mola-btn {
   flex: 1;
   border: 0;
   border-radius: 999px;
-  padding: 10px 12px;
+  padding: 10px 14px;
   font: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+
+.mola-btn:hover {
+  opacity: 0.92;
 }
 
 .mola-btn.primary {
   background: #24a3b1;
-  color: #041416;
+  color: #031518;
 }
 
 .mola-btn.ghost {
   background: transparent;
-  color: #d7e6ea;
-  border: 1px solid #2a3d42;
+  color: #e2f1f4;
+  border: 1px solid rgba(155, 232, 239, 0.32);
+}
+
+.mola-btn.text {
+  background: transparent;
+  color: #96b4bc;
+  padding: 6px 10px;
+  font-weight: 500;
 }
 
 .mola-btn.danger {
-  background: #7a2430;
+  background: #8a2735;
   color: #fff;
 }
 
 .mola-live {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
   font-size: 11px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #7fd7e0;
-  margin-bottom: 6px;
 }
 
 .mola-dot {
@@ -174,6 +402,16 @@
   border-radius: 50%;
   background: #3dd68c;
   box-shadow: 0 0 10px #3dd68c;
+}
+
+.mola-dot.is-err {
+  background: #f06e7d;
+  box-shadow: 0 0 10px #f06e7d;
+}
+
+@keyframes mola-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes mola-pop {
@@ -199,37 +437,35 @@
 
 @media (max-width: 640px) {
   .mola-voice-root {
-    right: 14px;
-    bottom: 14px;
+    right: 12px;
+    bottom: 12px;
   }
 
-  .mola-panel {
-    width: min(340px, calc(100vw - 28px));
+  .mola-voice-root .mola-panel {
+    width: min(352px, calc(100vw - 24px));
   }
 
   .mola-orb-core {
-    flex-basis: 60px;
-    width: 60px;
-    height: 60px;
+    flex-basis: 56px;
+    width: 56px;
+    height: 56px;
   }
 
   .mola-orb-prompt {
-    max-width: 122px;
-    font-size: 11px;
+    display: none;
   }
 }
 
-/* ---- CSS voice orb (replaces the WebGL shader orb: nothing to glitch) ---- */
+/* ---- CSS voice orb ---- */
 .vorb {
   --vorb-lvl: 0;
   --vorb-hue: 170;
   position: relative;
-  width: 230px;
-  height: 230px;
-  transform: scale(calc(1 + var(--vorb-lvl) * 0.05));
+  width: 140px;
+  height: 140px;
+  transform: scale(calc(1 + var(--vorb-lvl) * 0.07));
   transition: transform 140ms ease-out;
 }
-/* the ring: a conic gradient masked to an annulus, slowly rotating */
 .vorb-spin {
   position: absolute;
   inset: 0;
@@ -241,12 +477,11 @@
     hsl(calc(var(--vorb-hue) - 15) 80% 40% / 0.55),
     hsl(var(--vorb-hue) 75% 62% / 0.95)
   );
-  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 11px), #000 calc(100% - 10px));
-  mask: radial-gradient(closest-side, transparent calc(100% - 11px), #000 calc(100% - 10px));
-  filter: blur(5px) saturate(1.25);
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
+  mask: radial-gradient(closest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
+  filter: blur(4px) saturate(1.25);
   animation: vorb-rotate 16s linear infinite;
 }
-/* soft glow that swells with voice level */
 .vorb-glow {
   position: absolute;
   inset: 0;
@@ -254,7 +489,7 @@
   background: radial-gradient(
     closest-side,
     transparent 55%,
-    hsl(var(--vorb-hue) 90% 60% / calc(0.10 + var(--vorb-lvl) * 0.30)) 78%,
+    hsl(var(--vorb-hue) 90% 60% / calc(0.10 + var(--vorb-lvl) * 0.32)) 78%,
     transparent 96%
   );
   filter: blur(10px);

@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="utf-8"/>
-    <title>Licenses | Westside Dentist</title>
-    <meta content="Licensing terms for Westside Dentist site content and assets." name="description"/>
+    <title>Licenses | Smile Masters &amp; Jaw Joint Matters</title>
+    <meta content="Licensing and attribution information for Smile Masters &amp; Jaw Joint Matters website assets." name="description"/>
     <meta content="width=device-width, initial-scale=1" name="viewport"/>
     <link href="https://fonts.googleapis.com" rel="preconnect"/>
     <link href="https://fonts.gstatic.com" rel="preconnect" crossorigin/>
@@ -22,56 +22,31 @@
         .legal-wrap a{color:#24a3b1;}
         .legal-foot{text-align:center;padding:40px 24px;border-top:1px solid #e2e2e2;color:#758696;font-size:14px;}
     </style>
-  <link rel="stylesheet" href="assets/js/mola-dental.css?v=20260917">
+    <link rel="stylesheet" href="assets/css/smile-masters.css?v=20261122"/>
+    <link rel="stylesheet" href="assets/js/mola-dental.css?v=20261122"/>
 </head>
 <body>
     <div class="legal-nav">
-        <a href="index.html"><img src="assets/img/lumora-logo.svg" alt="Westside Dentist logo" height="30"/></a>
+        <a href="index.html"><img src="assets/img/lumora-logo-dark.svg" alt="Smile Masters &amp; Jaw Joint Matters" height="32"/></a>
         <a class="back" href="index.html">&larr; Back to home</a>
     </div>
     <main class="legal-wrap">
-<h1>Licenses</h1>
-<p class="updated">Last updated: June 2026</p>
-
-<p>This page sets out the licensing terms for the content and assets used across the Westside Dentist website.</p>
-<h2>Site content</h2>
-<p>All copy, branding, logos, and design on this website are the property of Westside Dentist and may not be reproduced, distributed, or used without prior written permission.</p>
-<h2>Imagery</h2>
-<p>Photography and illustrations on this site are either owned by Westside Dentist, generated for our exclusive use, or licensed from third parties for use within this website only.</p>
-<h2>Third-party software</h2>
-<ul>
-<li>Animations are powered by GSAP, used under its standard license.</li>
-<li>Typography uses the Sora typeface under the SIL Open Font License.</li>
-</ul>
-<h2>Permitted use</h2>
-<p>You may view and share links to this website. Any other use, including copying layouts, code, or assets, requires written consent.</p>
-<h2>Contact</h2>
-<p>For licensing enquiries, contact <a href="mailto:hello@moladental.com">hello@moladental.com</a>.</p>
-
-</main>
-    <div class="legal-foot">&copy; 2026 Westside Dentist. All rights reserved. &middot; <a href="terms.html" style="color:#758696;">Terms &amp; Conditions</a></div>
-
-<script>
-/* Mola image guard: any failed/empty image -> on-brand gradient SVG so nothing ever looks broken. */
-(function(){
-  function ph(label){
-    var t=(label||'Westside Dentist').replace(/[<>&]/g,'').slice(0,22);
-    var svg='<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">'
-     +'<defs><linearGradient id="lg" x1="0" y1="0" x2="1280" y2="720" gradientUnits="userSpaceOnUse">'
-     +'<stop offset="0" stop-color="#24a3b1"/><stop offset="1" stop-color="#011f23"/></linearGradient></defs>'
-     +'<rect width="1280" height="720" fill="url(#lg)"/>'
-     +'<circle cx="640" cy="298" r="44" fill="#fff" opacity="0.9"/>'
-     +'<text x="640" y="436" fill="#fff" font-family="Sora,Arial" font-size="40" font-weight="600" text-anchor="middle" opacity="0.92">'+t+'</text></svg>';
-    return 'data:image/svg+xml;utf8,'+encodeURIComponent(svg);
-  }
-  function bind(im){
-    im.addEventListener('error',function(){ if(im.dataset.fbk)return; im.dataset.fbk='1'; im.src=ph(im.alt); });
-    if(im.complete && im.naturalWidth===0 && !im.dataset.fbk){ im.dataset.fbk='1'; im.src=ph(im.alt); }
-  }
-  document.querySelectorAll('img').forEach(bind);
-})();
-</script>
-<script src="assets/js/backend-url.js?v=20260918"></script>
-<script src="assets/js/mola-widget.js?v=20260918" defer></script>
+        <h1>Licenses &amp; Attributions</h1>
+        <p class="updated">Smile Masters &amp; Jaw Joint Matters · Bandra West, Mumbai</p>
+        <p>This page outlines licensing terms for content and open-source software used on the Smile Masters &amp; Jaw Joint Matters website.</p>
+        <h2>Clinic content</h2>
+        <p>All clinic copy, branding, and uploaded clinical photography belong to Smile Masters &amp; Jaw Joint Matters and may not be redistributed without permission.</p>
+        <h2>Third-party libraries</h2>
+        <ul>
+            <li>Motion animations use GSAP under its standard license.</li>
+            <li>Typography uses the Sora typeface under the SIL Open Font License.</li>
+        </ul>
+        <h2>Contact</h2>
+        <p>For licensing enquiries, contact <a href="mailto:info@smilemastersindia.com" data-cms-href="email"><span data-cms="email">info@smilemastersindia.com</span></a>.</p>
+    </main>
+    <div class="legal-foot">&copy; 2026 Smile Masters &amp; Jaw Joint Matters. All rights reserved. &middot; <a href="terms.html" style="color:#758696;">Terms &amp; Conditions</a></div>
+    <script src="assets/js/backend-url.js?v=20261122"></script>
+    <script src="assets/js/smile-masters-cms.js?v=20261122" defer></script>
+    <script src="assets/js/mola-widget.js?v=20261122" defer></script>
 </body>
 </html>

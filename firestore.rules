@@ -1,0 +1,348 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function hasVerifiedEmail() {
+      return isSignedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true;
+    }
+
+    function isPrimaryAdmin() {
+      return hasVerifiedEmail()
+        && request.auth.token.email == "arhandanawala@gmail.com";
+    }
+
+    function isListedAdmin() {
+      return hasVerifiedEmail()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.token.email))
+        && get(/databases/$(database)/documents/admins/$(request.auth.token.email)).data.role in ['admin', 'super_admin'];
+    }
+
+    function isAdmin() {
+      return isPrimaryAdmin() || isListedAdmin();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isValidEmailId(id) {
+      return id is string
+        && id.size() >= 5
+        && id.size() <= 160
+        && id.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    function isBoundedString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidSiteContent(data) {
+      return data.keys().hasAll([
+          'clinicName', 'tagline', 'foundedYear', 'phone', 'email', 'address', 'city',
+          'openingHours', 'heroEyebrow', 'heroHeadline', 'heroMobileHeadline',
+          'heroDescription', 'heroCtaText', 'heroCtaLink', 'heroSecondaryCtaText',
+          'heroSecondaryCtaLink', 'heroDesktopImage', 'heroMobileImage',
+          'aboutEyebrow', 'aboutHeadline', 'aboutDescription',
+          'doctorsSectionTitle', 'doctorsSectionSubtitle',
+          'treatmentsSectionTitle', 'treatmentsSectionSubtitle',
+          'bookingNotice', 'footerDescription',
+          'socialInstagram', 'socialFacebook', 'socialYoutube', 'socialLinkedin',
+          'notificationEmail', 'notifyOnNewLead', 'notifyOnNewAppointment',
+          'faqs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'clinicName', 'tagline', 'foundedYear', 'phone', 'email', 'address', 'city',
+          'openingHours', 'heroEyebrow', 'heroHeadline', 'heroMobileHeadline',
+          'heroDescription', 'heroCtaText', 'heroCtaLink', 'heroSecondaryCtaText',
+          'heroSecondaryCtaLink', 'heroDesktopImage', 'heroMobileImage',
+          'aboutEyebrow', 'aboutHeadline', 'aboutDescription',
+          'doctorsSectionTitle', 'doctorsSectionSubtitle',
+          'treatmentsSectionTitle', 'treatmentsSectionSubtitle',
+          'bookingNotice', 'footerDescription',
+          'socialInstagram', 'socialFacebook', 'socialYoutube', 'socialLinkedin',
+          'notificationEmail', 'notifyOnNewLead', 'notifyOnNewAppointment',
+          'faqs', 'updatedAt'
+        ])
+        && isBoundedString(data.clinicName, 1, 160)
+        && isBoundedString(data.tagline, 0, 240)
+        && isBoundedString(data.foundedYear, 0, 20)
+        && isBoundedString(data.phone, 4, 40)
+        && isBoundedString(data.email, 3, 160)
+        && isBoundedString(data.address, 4, 400)
+        && isBoundedString(data.city, 0, 120)
+        && isBoundedString(data.openingHours, 0, 300)
+        && isBoundedString(data.heroEyebrow, 0, 120)
+        && isBoundedString(data.heroHeadline, 1, 240)
+        && isBoundedString(data.heroMobileHeadline, 1, 180)
+        && isBoundedString(data.heroDescription, 1, 800)
+        && isBoundedString(data.heroCtaText, 1, 80)
+        && isBoundedString(data.heroCtaLink, 1, 300)
+        && isBoundedString(data.heroSecondaryCtaText, 0, 80)
+        && isBoundedString(data.heroSecondaryCtaLink, 0, 300)
+        && isBoundedString(data.heroDesktopImage, 0, 350000)
+        && isBoundedString(data.heroMobileImage, 0, 350000)
+        && isBoundedString(data.aboutEyebrow, 0, 120)
+        && isBoundedString(data.aboutHeadline, 0, 240)
+        && isBoundedString(data.aboutDescription, 0, 2000)
+        && isBoundedString(data.doctorsSectionTitle, 0, 200)
+        && isBoundedString(data.doctorsSectionSubtitle, 0, 500)
+        && isBoundedString(data.treatmentsSectionTitle, 0, 200)
+        && isBoundedString(data.treatmentsSectionSubtitle, 0, 500)
+        && isBoundedString(data.bookingNotice, 0, 500)
+        && isBoundedString(data.footerDescription, 0, 600)
+        && isBoundedString(data.socialInstagram, 0, 300)
+        && isBoundedString(data.socialFacebook, 0, 300)
+        && isBoundedString(data.socialYoutube, 0, 300)
+        && isBoundedString(data.socialLinkedin, 0, 300)
+        && isBoundedString(data.notificationEmail, 0, 160)
+        && data.notifyOnNewLead is bool
+        && data.notifyOnNewAppointment is bool
+        && data.faqs is list && data.faqs.size() <= 30
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDoctor(data) {
+      return data.keys().hasAll([
+          'name', 'credentials', 'role', 'bio', 'specializations',
+          'experience', 'photoUrl', 'published', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'name', 'credentials', 'role', 'bio', 'specializations',
+          'experience', 'photoUrl', 'published', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && isBoundedString(data.name, 2, 120)
+        && isBoundedString(data.credentials, 0, 200)
+        && isBoundedString(data.role, 0, 160)
+        && isBoundedString(data.bio, 0, 2500)
+        && data.specializations is list && data.specializations.size() <= 20
+        && isBoundedString(data.experience, 0, 160)
+        && isBoundedString(data.photoUrl, 0, 350000)
+        && data.published is bool
+        && data.sortOrder is number && data.sortOrder >= 0 && data.sortOrder <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTreatment(data) {
+      return data.keys().hasAll([
+          'title', 'slug', 'category', 'shortDescription', 'fullDescription',
+          'highlights', 'imageUrl', 'published', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'title', 'slug', 'category', 'shortDescription', 'fullDescription',
+          'highlights', 'imageUrl', 'published', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && isBoundedString(data.title, 2, 140)
+        && isBoundedString(data.slug, 1, 140)
+        && isBoundedString(data.category, 1, 100)
+        && isBoundedString(data.shortDescription, 0, 500)
+        && isBoundedString(data.fullDescription, 0, 4000)
+        && data.highlights is list && data.highlights.size() <= 15
+        && isBoundedString(data.imageUrl, 0, 350000)
+        && data.published is bool
+        && data.sortOrder is number && data.sortOrder >= 0 && data.sortOrder <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTestimonial(data) {
+      return data.keys().hasAll([
+          'reviewerName', 'reviewerContext', 'quote', 'consentConfirmed',
+          'published', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'reviewerName', 'reviewerContext', 'quote', 'consentConfirmed',
+          'published', 'sortOrder', 'createdAt', 'updatedAt'
+        ])
+        && isBoundedString(data.reviewerName, 1, 120)
+        && isBoundedString(data.reviewerContext, 0, 160)
+        && isBoundedString(data.quote, 5, 1500)
+        && data.consentConfirmed is bool
+        && data.published is bool
+        && data.sortOrder is number && data.sortOrder >= 0 && data.sortOrder <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLead(data) {
+      return data.keys().hasAll([
+          'name', 'phone', 'email', 'enquiryType', 'treatment',
+          'preferredContact', 'message', 'status', 'notes', 'sourcePage',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'name', 'phone', 'email', 'enquiryType', 'treatment',
+          'preferredContact', 'message', 'status', 'notes', 'sourcePage',
+          'createdAt', 'updatedAt'
+        ])
+        && isBoundedString(data.name, 2, 120)
+        && isBoundedString(data.phone, 6, 32)
+        && isBoundedString(data.email, 0, 160)
+        && isBoundedString(data.enquiryType, 1, 80)
+        && isBoundedString(data.treatment, 0, 140)
+        && isBoundedString(data.preferredContact, 0, 40)
+        && isBoundedString(data.message, 0, 1200)
+        && data.status in ['New', 'Contacted', 'Follow-up', 'Converted', 'Closed']
+        && isBoundedString(data.notes, 0, 2000)
+        && isBoundedString(data.sourcePage, 0, 120)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAppointment(data) {
+      return data.keys().hasAll([
+          'name', 'phone', 'email', 'treatment', 'preferredDate', 'preferredTime',
+          'preferredContact', 'message', 'status', 'notes', 'sourcePage',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'name', 'phone', 'email', 'treatment', 'preferredDate', 'preferredTime',
+          'preferredContact', 'message', 'status', 'notes', 'sourcePage',
+          'createdAt', 'updatedAt'
+        ])
+        && isBoundedString(data.name, 2, 120)
+        && isBoundedString(data.phone, 6, 32)
+        && isBoundedString(data.email, 0, 160)
+        && isBoundedString(data.treatment, 1, 140)
+        && isBoundedString(data.preferredDate, 4, 40)
+        && isBoundedString(data.preferredTime, 0, 40)
+        && isBoundedString(data.preferredContact, 0, 40)
+        && isBoundedString(data.message, 0, 1200)
+        && data.status in ['Pending', 'Confirmed', 'Rescheduled', 'Rejected', 'Completed']
+        && isBoundedString(data.notes, 0, 2000)
+        && isBoundedString(data.sourcePage, 0, 120)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminUser(data) {
+      return data.keys().hasAll(['email', 'displayName', 'role', 'addedBy', 'createdAt'])
+        && data.keys().hasOnly(['email', 'displayName', 'role', 'addedBy', 'createdAt'])
+        && isBoundedString(data.email, 5, 160)
+        && isBoundedString(data.displayName, 0, 120)
+        && data.role in ['admin', 'super_admin']
+        && isBoundedString(data.addedBy, 1, 160)
+        && data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /siteContent/{docId} {
+      allow read: if docId == 'main' || isAdmin();
+      allow create, update: if isAdmin()
+        && docId == 'main'
+        && isValidSiteContent(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /doctors/{doctorId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow create: if isAdmin()
+        && isValidId(doctorId)
+        && isValidDoctor(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(doctorId)
+        && isValidDoctor(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    match /treatments/{treatmentId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow create: if isAdmin()
+        && isValidId(treatmentId)
+        && isValidTreatment(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(treatmentId)
+        && isValidTreatment(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    match /testimonials/{testimonialId} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow create: if isAdmin()
+        && isValidId(testimonialId)
+        && isValidTestimonial(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(testimonialId)
+        && isValidTestimonial(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    match /leads/{leadId} {
+      allow read: if isAdmin();
+      allow create: if isValidId(leadId)
+        && isValidLead(request.resource.data)
+        && request.resource.data.status == 'New'
+        && request.resource.data.notes == ''
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidLead(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    match /appointments/{appointmentId} {
+      allow read: if isAdmin();
+      allow create: if isValidId(appointmentId)
+        && isValidAppointment(request.resource.data)
+        && request.resource.data.status == 'Pending'
+        && request.resource.data.notes == ''
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidAppointment(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    match /admins/{adminEmail} {
+      allow get: if hasVerifiedEmail() && (request.auth.token.email == adminEmail || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidEmailId(adminEmail)
+        && isValidAdminUser(request.resource.data)
+        && request.resource.data.email == adminEmail
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin()
+        && isValidEmailId(adminEmail)
+        && isValidAdminUser(request.resource.data)
+        && request.resource.data.email == adminEmail
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin()
+        && request.auth.token.email != adminEmail
+        && adminEmail != "arhandanawala@gmail.com";
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -7,32 +7,39 @@ import cookieParser from "cookie-parser";
 import { WebSocketServer } from "ws";
 import dotenv from "dotenv";
 import * as db from "./db.js";
+import * as cms from "./cms-store.js";
 import * as cal from "./cal.js";
 import * as auth from "./auth.js";
-import { attachLiveSession } from "./gemini-live.js";
+import { attachLiveSession, getVoiceStatus } from "./gemini-live.js";
 import { MAYA_SYSTEM_PROMPT as defaultPromptText } from "./prompt.js";
 import { subscribe } from "./livebus.js";
 
-// The clinic's local runtime must prefer this project's ignored .env file over
-// inherited shell variables, otherwise an old admin session can reject its own credentials.
-dotenv.config({ override: true });
+// Load local .env without overriding platform-injected environment variables (such as GEMINI_API_KEY).
+dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
-const PORT = Number(process.env.PORT || 8787);
+const PORT = Number(process.env.PORT || 3000);
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
-    clinic: process.env.CLINIC_NAME || "Westside Dentist",
-    eventTypeId: Number(process.env.CAL_EVENT_TYPE_ID),
+    clinic: process.env.CLINIC_NAME || "Smile Masters & Jaw Joint Matters",
+    voice: getVoiceStatus(),
   });
 });
 
+app.get("/api/voice/status", (_req, res) => {
+  res.json(getVoiceStatus());
+});
+
+// ---- Admin Auth ----
+app.get("/api/auth/status", auth.authStatus);
+app.post("/api/auth/setup", auth.setupInitialAdmin);
 app.post("/api/login", auth.login);
 app.post("/api/logout", auth.logout);
 app.get("/api/me", (req, res) => {
@@ -40,7 +47,201 @@ app.get("/api/me", (req, res) => {
   if (!session) return res.status(401).json({ error: "Unauthorized" });
   res.json({ user: session.sub });
 });
+app.put("/api/admin/credentials", auth.requireAdmin, auth.updateCredentials);
 
+// ---- Public CMS & Lead / Appointment Capture ----
+app.get("/api/cms/public", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(cms.getPublicSnapshot());
+});
+
+app.post("/api/public/leads", (req, res) => {
+  try {
+    if (req.body?.company_website) {
+      return res.status(200).json({ ok: true });
+    }
+    const lead = cms.createLead(req.body || {});
+    res.status(201).json({ ok: true, lead });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Invalid lead submission" });
+  }
+});
+
+app.post("/api/public/appointments", (req, res) => {
+  try {
+    if (req.body?.company_website || req.body?.website) {
+      return res.status(200).json({ ok: true });
+    }
+    const appointment = cms.createAppointment(req.body || {});
+    res.status(201).json({ ok: true, appointment });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ error: err instanceof Error ? err.message : "Invalid appointment request" });
+  }
+});
+
+// ---- Protected Admin CMS Endpoints ----
+app.get("/api/admin/snapshot", auth.requireAdmin, (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ...cms.getAdminSnapshot(),
+    voice: {
+      ...getVoiceStatus(),
+      stats: db.stats(),
+      calls: db.listCalls(),
+    },
+  });
+});
+
+app.post("/api/admin/seed-defaults", auth.requireAdmin, (_req, res) => {
+  const result = cms.seedDefaults();
+  res.json({ ok: true, ...result, snapshot: cms.getAdminSnapshot() });
+});
+
+app.put("/api/admin/site-content", auth.requireAdmin, (req, res) => {
+  try {
+    const siteContent = cms.updateSiteContent(req.body || {});
+    res.json({ ok: true, siteContent });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Failed to save content" });
+  }
+});
+
+// Doctors
+app.post("/api/admin/doctors", auth.requireAdmin, (req, res) => {
+  try {
+    const doctor = cms.upsertDoctor(req.body || {});
+    res.status(201).json({ ok: true, doctor });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Failed to create doctor" });
+  }
+});
+
+app.put("/api/admin/doctors/reorder", auth.requireAdmin, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+  if (!ids.length) return res.status(400).json({ error: "Ordered IDs required" });
+  const doctors = cms.reorderDoctors(ids);
+  res.json({ ok: true, doctors });
+});
+
+app.put("/api/admin/doctors/:id", auth.requireAdmin, (req, res) => {
+  try {
+    const doctor = cms.upsertDoctor(req.body || {}, req.params.id);
+    res.json({ ok: true, doctor });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Failed to update doctor" });
+  }
+});
+
+app.delete("/api/admin/doctors/:id", auth.requireAdmin, (req, res) => {
+  const deleted = cms.deleteDoctor(req.params.id);
+  if (!deleted) return res.status(404).json({ error: "Doctor not found" });
+  res.json({ ok: true });
+});
+
+// Treatments
+app.post("/api/admin/treatments", auth.requireAdmin, (req, res) => {
+  try {
+    const treatment = cms.upsertTreatment(req.body || {});
+    res.status(201).json({ ok: true, treatment });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ error: err instanceof Error ? err.message : "Failed to create treatment" });
+  }
+});
+
+app.put("/api/admin/treatments/reorder", auth.requireAdmin, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+  if (!ids.length) return res.status(400).json({ error: "Ordered IDs required" });
+  const treatments = cms.reorderTreatments(ids);
+  res.json({ ok: true, treatments });
+});
+
+app.put("/api/admin/treatments/:id", auth.requireAdmin, (req, res) => {
+  try {
+    const treatment = cms.upsertTreatment(req.body || {}, req.params.id);
+    res.json({ ok: true, treatment });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ error: err instanceof Error ? err.message : "Failed to update treatment" });
+  }
+});
+
+app.delete("/api/admin/treatments/:id", auth.requireAdmin, (req, res) => {
+  const deleted = cms.deleteTreatment(req.params.id);
+  if (!deleted) return res.status(404).json({ error: "Treatment not found" });
+  res.json({ ok: true });
+});
+
+// Testimonials
+app.post("/api/admin/testimonials", auth.requireAdmin, (req, res) => {
+  try {
+    const testimonial = cms.upsertTestimonial(req.body || {});
+    res.status(201).json({ ok: true, testimonial });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ error: err instanceof Error ? err.message : "Failed to save testimonial" });
+  }
+});
+
+app.put("/api/admin/testimonials/:id", auth.requireAdmin, (req, res) => {
+  try {
+    const testimonial = cms.upsertTestimonial(req.body || {}, req.params.id);
+    res.json({ ok: true, testimonial });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ error: err instanceof Error ? err.message : "Failed to update testimonial" });
+  }
+});
+
+app.delete("/api/admin/testimonials/:id", auth.requireAdmin, (req, res) => {
+  const deleted = cms.deleteTestimonial(req.params.id);
+  if (!deleted) return res.status(404).json({ error: "Testimonial not found" });
+  res.json({ ok: true });
+});
+
+// Leads
+app.patch("/api/admin/leads/:id", auth.requireAdmin, (req, res) => {
+  try {
+    const lead = cms.updateLead(req.params.id, req.body || {});
+    if (!lead) return res.status(404).json({ error: "Lead not found" });
+    res.json({ ok: true, lead });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Failed to update lead" });
+  }
+});
+
+app.delete("/api/admin/leads/:id", auth.requireAdmin, (req, res) => {
+  const deleted = cms.deleteLead(req.params.id);
+  if (!deleted) return res.status(404).json({ error: "Lead not found" });
+  res.json({ ok: true });
+});
+
+// Appointments
+app.patch("/api/admin/appointments/:id", auth.requireAdmin, (req, res) => {
+  try {
+    const appointment = cms.updateAppointment(req.params.id, req.body || {});
+    if (!appointment) return res.status(404).json({ error: "Appointment not found" });
+    res.json({ ok: true, appointment });
+  } catch (err) {
+    res
+      .status(400)
+      .json({ error: err instanceof Error ? err.message : "Failed to update appointment" });
+  }
+});
+
+app.delete("/api/admin/appointments/:id", auth.requireAdmin, (req, res) => {
+  const deleted = cms.deleteAppointment(req.params.id);
+  if (!deleted) return res.status(404).json({ error: "Appointment not found" });
+  res.json({ ok: true });
+});
+
+// ---- Optional Cal.com Routes ----
 app.get("/api/slots", async (req, res) => {
   try {
     const result = await cal.getSlots({
@@ -64,8 +265,9 @@ app.post("/api/book", async (req, res) => {
   }
 });
 
+// ---- Voice AI Call Logs, Recordings & Prompt ----
 app.get("/api/calls", auth.requireAdmin, (_req, res) => {
-  res.json({ stats: db.stats(), calls: db.listCalls() });
+  res.json({ stats: db.stats(), calls: db.listCalls(), voice: getVoiceStatus() });
 });
 
 app.get("/api/calls/:id", auth.requireAdmin, (req, res) => {
@@ -74,7 +276,10 @@ app.get("/api/calls/:id", auth.requireAdmin, (req, res) => {
   res.json(call);
 });
 
-app.get("/api/calls/:id/recording", auth.requireAdmin, (req, res) => {
+app.get("/api/calls/:id/recording", (req, res) => {
+  const tokenParam = typeof req.query.token === "string" ? req.query.token : "";
+  const session = auth.readSession(req) || (tokenParam ? auth.unsign(tokenParam) : null);
+  if (!session) return res.status(401).json({ error: "Unauthorized" });
   const call = db.getCall(req.params.id);
   if (!call) return res.status(404).json({ error: "Not found" });
   const file = path.join(root, "data", "recordings", `${call.id}.wav`);
@@ -104,82 +309,7 @@ app.delete("/api/prompt", auth.requireAdmin, (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/api/bookings/:uid/cancel", auth.requireAdmin, async (req, res) => {
-  try {
-    await cal.cancelBooking(req.params.uid);
-    const call = db.listCalls().find((c) => c.calBookingUid === req.params.uid);
-    if (call) {
-      db.patchCall(call.id, { outcome: "cancelled", calBookingUid: null, slotStart: null });
-    }
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-function keyStatus(settingName, envName) {
-  const fromSettings = db.getSetting(settingName);
-  const active = fromSettings || process.env[envName] || "";
-  return {
-    set: Boolean(active),
-    source: fromSettings ? "admin panel" : active ? "environment" : "not set",
-    tail: active ? active.slice(-4) : null,
-  };
-}
-
-app.get("/api/keys", auth.requireAdmin, (_req, res) => {
-  // Only ever expose whether a key is set + its last 4 chars, never the value.
-  res.json({ gemini: keyStatus("geminiApiKey", "GEMINI_API_KEY"), cal: keyStatus("calApiKey", "CAL_API_KEY") });
-});
-
-async function validateGeminiKey(key) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`
-  );
-  if (!res.ok) throw new Error(`Gemini rejected this key (HTTP ${res.status})`);
-}
-
-async function validateCalKey(key) {
-  const res = await fetch("https://api.cal.com/v2/bookings?take=1", {
-    headers: { Authorization: `Bearer ${key}`, "cal-api-version": "2026-02-25" },
-  });
-  if (res.status === 401 || res.status === 403) {
-    throw new Error("Cal.com rejected this key (unauthorized)");
-  }
-}
-
-app.put("/api/keys", auth.requireAdmin, async (req, res) => {
-  const { geminiApiKey, calApiKey } = req.body || {};
-  try {
-    if (typeof geminiApiKey === "string") {
-      const trimmed = geminiApiKey.trim();
-      if (trimmed && trimmed !== "clear") await validateGeminiKey(trimmed);
-      db.setSetting("geminiApiKey", trimmed === "" ? null : trimmed || null);
-    }
-    if (typeof calApiKey === "string") {
-      const trimmed = calApiKey.trim();
-      if (trimmed && trimmed !== "clear") await validateCalKey(trimmed);
-      db.setSetting("calApiKey", trimmed === "" ? null : trimmed || null);
-    }
-    res.json({
-      ok: true,
-      gemini: keyStatus("geminiApiKey", "GEMINI_API_KEY"),
-      cal: keyStatus("calApiKey", "CAL_API_KEY"),
-    });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-app.get("/api/bookings", auth.requireAdmin, async (_req, res) => {
-  try {
-    const bookings = await cal.listBookings();
-    res.json({ bookings });
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
+// ---- Built Admin SPA ----
 const adminDist = path.join(root, "dist", "admin");
 if (fs.existsSync(adminDist)) {
   app.use("/admin", express.static(adminDist));
@@ -197,9 +327,7 @@ if (fs.existsSync(adminDist)) {
   });
 }
 
-// The site is served from the repo root, so fence off everything that is not
-// meant to be public: server code, source, call data/recordings, env files,
-// git metadata and build configs. Anything under these prefixes 404s.
+// Fence off private paths so nothing internal is served publicly.
 const PRIVATE_PREFIXES = [
   "/data",
   "/server",
@@ -210,10 +338,15 @@ const PRIVATE_PREFIXES = [
   "/.env",
   "/vite.",
   "/tsconfig",
-  "/Dockerfile",
+  "/dockerfile",
   "/.dockerignore",
   "/.gitignore",
   "/.nojekyll",
+  "/firestore.rules",
+  "/eslint.config.js",
+  "/metadata.json",
+  "/package.json",
+  "/package-lock.json",
 ];
 app.use((req, res, next) => {
   const p = req.path.toLowerCase();
@@ -233,18 +366,19 @@ app.use(
 );
 
 const server = http.createServer(app);
-// Two WSS instances on one HTTP server must use noServer + explicit upgrade
-// routing: path-filtered servers each call handleUpgrade for EVERY upgrade
-// and abort mismatches with HTTP 400 — injected straight into the other
-// path's upgraded socket, which killed every live call.
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", (socket, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const timezone = url.searchParams.get("timezone") || "Europe/London";
+  const timezone = url.searchParams.get("timezone") || "Asia/Kolkata";
   attachLiveSession(socket, { timezone }).catch((err) => {
     try {
-      socket.send(JSON.stringify({ type: "error", message: err.message }));
+      socket.send(
+        JSON.stringify({
+          type: "error",
+          message: err instanceof Error ? err.message : "Could not connect to Voice AI.",
+        })
+      );
     } catch {
       /* ignore */
     }
@@ -252,10 +386,6 @@ wss.on("connection", (socket, req) => {
   });
 });
 
-// Admin live listening: bridges chunks published on the call bus to
-// authenticated admin browsers. cookieParser never runs on WebSocket
-// upgrades, so parse the upgrade Cookie header into the shape readSession
-// expects ({ cookies: { mola_admin: token } }).
 function upgradeCookies(header) {
   const cookies = {};
   if (!header) return cookies;
@@ -270,8 +400,11 @@ function upgradeCookies(header) {
 const monitorWss = new WebSocketServer({ noServer: true });
 
 monitorWss.on("connection", (socket, req) => {
-  const session = auth.readSession({ cookies: upgradeCookies(req.headers.cookie) });
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const tokenParam = url.searchParams.get("token");
+  const session =
+    auth.readSession({ cookies: upgradeCookies(req.headers.cookie) }) ||
+    (tokenParam ? auth.unsign(tokenParam) : null);
   const callId = url.searchParams.get("callId");
   if (!session || !callId) {
     socket.close(4401, "Unauthorized");
@@ -281,12 +414,10 @@ monitorWss.on("connection", (socket, req) => {
     try {
       if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(chunk));
     } catch {
-      /* dead socket — ignore */
+      /* dead socket */
     }
   });
   socket.on("close", unsubscribe);
-  // A socket that errors never emits close reliably; unsubscribing here keeps
-  // the bus from writing into it. Double-unsubscribe is harmless.
   socket.on("error", unsubscribe);
 });
 
@@ -302,7 +433,7 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Westside Dentist running on http://127.0.0.1:${PORT}`);
-  console.log(`Admin        http://127.0.0.1:${PORT}/admin`);
-  console.log(`Voice Maya   bottom-right booking orb on the public site`);
+  console.log(`Smile Masters & Jaw Joint Matters running on http://127.0.0.1:${PORT}`);
+  console.log(`Admin CMS    http://127.0.0.1:${PORT}/admin`);
+  console.log(`Voice Assist bottom-right assistant orb on the public site`);
 });

@@ -1,233 +1,124 @@
 import fs from "node:fs";
 import path from "node:path";
-import { WebSocket } from "ws";
-import { MAYA_SYSTEM_PROMPT, LIVE_TOOLS } from "./prompt.js";
+import { GoogleGenAI, Modality } from "@google/genai";
+import { MAYA_SYSTEM_PROMPT, LIVE_FUNCTION_DECLARATIONS } from "./prompt.js";
 import { publish } from "./livebus.js";
 import * as db from "./db.js";
-import * as cal from "./cal.js";
+import * as cms from "./cms-store.js";
 
-const GEMINI_WS =
-  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+export const DEFAULT_LIVE_MODEL = "gemini-3.8-live";
+export const DEFAULT_VOICE = "Zephyr";
 
-function activeSystemPrompt() {
-  // The admin dashboard can override the built-in prompt at runtime; falling
-  // back keeps calls working if the override is deleted or corrupted.
-  return db.getSetting("systemPrompt") || MAYA_SYSTEM_PROMPT;
+function activeApiKey() {
+  return process.env.GEMINI_API_KEY || "";
 }
 
-function setupPayload(model) {
+export function getVoiceStatus() {
+  const configured = Boolean(activeApiKey());
   return {
-    setup: {
-      model: `models/${model}`,
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: process.env.GEMINI_VOICE || "Aoede",
-            },
-          },
-        },
-      },
-      systemInstruction: { parts: [{ text: activeSystemPrompt() }] },
-      tools: LIVE_TOOLS,
-      realtimeInputConfig: {
-        automaticActivityDetection: { disabled: true },
-        activityHandling: "START_OF_ACTIVITY_INTERRUPTS",
-      },
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
-    },
+    configured,
+    model: process.env.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL,
+    voice: process.env.GEMINI_VOICE || DEFAULT_VOICE,
   };
 }
 
-function connectGemini(model) {
-  // Admin panel override first (data/settings.json), env var as fallback.
-  const key = db.getSetting("geminiApiKey") || process.env.GEMINI_API_KEY;
-  const url = `${GEMINI_WS}?key=${encodeURIComponent(key)}`;
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    const timer = setTimeout(() => {
-      ws.terminate();
-      reject(new Error(`Gemini handshake timeout for ${model}`));
-    }, 8000);
-    ws.once("open", () => {
-      ws.send(JSON.stringify(setupPayload(model)));
-    });
-    ws.once("message", (raw) => {
-      clearTimeout(timer);
-      let data;
-      try {
-        data = JSON.parse(raw.toString());
-      } catch (err) {
-        ws.close();
-        reject(err);
-        return;
-      }
-      if (data.error) {
-        ws.close();
-        reject(new Error(data.error.message || "Gemini setup error"));
-        return;
-      }
-      resolve(ws);
-    });
-    ws.once("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-}
-
-async function connectWithFallback() {
-  const primary = process.env.GEMINI_LIVE_MODEL || "gemini-3.1-flash-live-preview";
-  const fallback = process.env.GEMINI_LIVE_FALLBACK || "gemini-3.8-live";
-  const tried = [];
-  for (const model of [primary, fallback, "gemini-2.5-flash-native-audio-latest"]) {
-    if (!model || tried.includes(model)) continue;
-    tried.push(model);
-    try {
-      const ws = await connectGemini(model);
-      return { ws, model };
-    } catch (err) {
-      console.warn(`[maya] ${model} failed: ${err.message}`);
-    }
-  }
-  throw new Error("Could not open a Gemini Live session");
+function activeSystemPrompt() {
+  const override = db.getSetting("systemPrompt");
+  const snap = cms.getPublicSnapshot();
+  const base = override || MAYA_SYSTEM_PROMPT;
+  const liveFacts = [
+    `LIVE CLINIC DATA:`,
+    `- Clinic: ${snap.siteContent.clinicName}`,
+    `- Phone: ${snap.siteContent.phone}`,
+    `- Email: ${snap.siteContent.email}`,
+    `- Address: ${snap.siteContent.address}`,
+    `- Hours: ${snap.siteContent.openingHours}`,
+    `- Doctors: ${snap.doctors.map((d) => `${d.name} (${d.credentials})`).join("; ")}`,
+    `- Treatments: ${snap.treatments.map((t) => t.title).join(", ")}`,
+  ].join("\n");
+  return `${base}\n\n${liveFacts}`;
 }
 
 async function runTool(name, args, callId) {
-  if (name === "get_available_slots") {
-    const result = await cal.getSlots({
-      timezone: args.timezone,
-      daysAhead: args.days_ahead,
-      preferredDate: args.preferred_date,
-    });
-    return cal.formatSlotsForMaya(result);
-  }
-  if (name === "cancel_appointment") {
-    const bookings = await cal.listBookings();
-    const booking = cal.findBooking(bookings, {
-      email: args.email,
-      startIso: args.start_iso,
-    });
-    if (!booking) {
-      return {
-        ok: false,
-        message:
-          "No upcoming appointment found for that email. Ask the caller to double-check the email they booked with.",
-      };
-    }
-    await cal.cancelBooking(booking.uid);
-    const call = db.listCalls().find((c) => c.calBookingUid === booking.uid);
-    if (call) {
-      db.patchCall(call.id, { outcome: "cancelled", calBookingUid: null, slotStart: null });
-    }
-    const when = booking.start ? new Date(booking.start).toUTCString().slice(0, 22) : "that time";
+  if (name === "get_clinic_details") {
+    const snap = cms.getPublicSnapshot();
     return {
       ok: true,
-      message: `Cancelled the appointment for ${when}. Tell the caller it's done and they're welcome back anytime.`,
-      cancelled: booking.uid,
+      clinicName: snap.siteContent.clinicName,
+      phone: snap.siteContent.phone,
+      email: snap.siteContent.email,
+      address: snap.siteContent.address,
+      openingHours: snap.siteContent.openingHours,
+      doctors: snap.doctors.map((d) => ({
+        name: d.name,
+        credentials: d.credentials,
+        role: d.role,
+        specializations: d.specializations,
+      })),
+      treatments: snap.treatments.map((t) => ({
+        title: t.title,
+        category: t.category,
+        summary: t.shortDescription,
+      })),
     };
   }
-  if (name === "reschedule_appointment") {
-    const bookings = await cal.listBookings();
-    const booking = cal.findBooking(bookings, { email: args.email });
-    if (!booking) {
-      return {
-        ok: false,
-        message: "No existing appointment found for that email. Offer to book a fresh one instead.",
-      };
-    }
-    const newStart = new Date(args.new_start_iso);
-    if (Number.isNaN(newStart.getTime())) throw new Error("Invalid new time");
-    const taken = await cal.bookedStarts();
-    for (const b of taken) {
-      if (Math.abs(b - newStart.getTime()) < 60_000 && booking.uid) {
-        // their own old slot is fine; anything else at the exact time is a clash
-        const own = Math.abs(new Date(booking.start).getTime() - newStart.getTime()) < 60_000;
-        if (!own) {
-          return { ok: false, message: "That time was just taken. Please offer another slot." };
-        }
-      }
-    }
-    const attendees = booking.attendees || [];
-    const created = await cal.createBooking({
-      name: attendees[0]?.name || "Patient",
-      email: args.email,
-      startIso: args.new_start_iso,
-      timezone: args.timezone,
-      notes: "rescheduled by Maya (voice)",
-    });
-    await cal.cancelBooking(booking.uid);
-    const call = db.listCalls().find((c) => c.calBookingUid === booking.uid);
-    if (call) {
-      db.patchCall(call.id, {
-        slotStart: created.start,
-        calBookingUid: created.uid,
-        calMeetingUrl: created.meetingUrl,
-      });
-    }
-    return {
-      ok: true,
-      message:
-        "Moved. Confirm the new time out loud and say a fresh confirmation email is on its way.",
-      booking: created,
-    };
-  }
-  if (name === "book_appointment") {
-    const booking = await cal.createBooking({
+
+  if (name === "request_appointment_callback") {
+    const appt = cms.createAppointment({
       name: args.name,
-      email: args.email,
       phone: args.phone,
-      startIso: args.start_iso,
-      timezone: args.timezone,
-      notes: args.notes,
+      email: args.email || "",
+      treatment: args.treatment || "General Consultation",
+      preferredDate: args.preferred_date || "Next available",
+      preferredTime: args.preferred_time || "Flexible",
+      preferredContact: "Phone Call",
+      message: args.notes || "Requested via Maya Voice Assistant",
+      sourcePage: "Maya Voice Assistant",
     });
+
     db.patchCall(callId, {
       outcome: "booked",
-      patientName: args.name,
-      patientEmail: args.email,
-      patientPhone: args.phone || null,
-      slotStart: booking.start || args.start_iso,
-      calBookingUid: booking.uid,
-      calMeetingUrl: booking.meetingUrl,
-      summary: args.notes || db.getCall(callId)?.summary,
+      patientName: appt.name,
+      patientEmail: appt.email || null,
+      patientPhone: appt.phone || null,
+      slotStart: [appt.preferredDate, appt.preferredTime].filter(Boolean).join(" · "),
+      summary: `${appt.treatment} — ${appt.message}`,
     });
+
     return {
       ok: true,
-      message: "Booked. Confirm the walk-in time out loud and say they will get a confirmation email.",
-      booking,
+      appointment: appt,
+      message:
+        "Appointment request saved to the Smile Masters Bandra West desk. Confirm the patient's details out loud and let them know our clinic team will reach out shortly to confirm their slot.",
     };
   }
+
   if (name === "save_call_outcome") {
+    const existing = db.getCall(callId);
     db.patchCall(callId, {
       outcome: args.booked ? "booked" : "not_booked",
-      summary: args.summary,
-      patientName: args.patient_name || db.getCall(callId)?.patientName,
-      patientEmail: args.patient_email || db.getCall(callId)?.patientEmail,
-      patientPhone: args.patient_phone || db.getCall(callId)?.patientPhone,
-      slotStart: args.slot_start || db.getCall(callId)?.slotStart,
+      summary: args.summary || existing?.summary || null,
+      patientName: args.patient_name || existing?.patientName || null,
+      patientEmail: args.patient_email || existing?.patientEmail || null,
+      patientPhone: args.patient_phone || existing?.patientPhone || null,
+      slotStart: args.slot_start || existing?.slotStart || null,
     });
     return { ok: true };
   }
+
   if (name === "end_call") {
-    // Maya decided the call is over (caller said goodbye, or the time-limit
-    // nudge). The actual close happens in the message pump after a short delay
-    // so her goodbye audio has time to play out.
     return {
       ok: true,
       ended: true,
-      message: "Say a warm one-line goodbye, then the call will end.",
+      message: "Say a warm one-line goodbye, then the call will close.",
     };
   }
-  return { ok: false, error: `Unknown tool ${name}` };
+
+  return { ok: false, error: `Unknown tool: ${name}` };
 }
 
 const TARGET_RATE = 16000;
 
-// Resamples raw mono PCM16 audio at `rate` down/up to TARGET_RATE using proper
-// linear interpolation: out[i] = lerp(in[floor(x)], in[ceil(x)], frac) where
-// x = i * (rate / TARGET_RATE). Indices are clamped; output is int16 LE.
 function resamplePcm16(buf, rate) {
   const srcSamples = Math.floor(buf.length / 2);
   if (srcSamples === 0) return Buffer.alloc(0);
@@ -238,8 +129,8 @@ function resamplePcm16(buf, rate) {
   const lastIdx = srcSamples - 1;
   for (let i = 0; i < outSamples; i++) {
     const x = i * step;
-    const i0 = Math.min(Math.floor(x), lastIdx); // clamp low
-    const i1 = Math.min(i0 + 1, lastIdx); // clamp high
+    const i0 = Math.min(Math.floor(x), lastIdx);
+    const i1 = Math.min(i0 + 1, lastIdx);
     const frac = x - i0;
     const a = buf.readInt16LE(i0 * 2);
     const b = buf.readInt16LE(i1 * 2);
@@ -251,27 +142,11 @@ function resamplePcm16(buf, rate) {
   return out;
 }
 
-// RMS of int16 LE samples, normalised to full scale (0 = silence, ~1 = peak).
-function rmsOf(buf) {
-  const n = Math.floor(buf.length / 2);
-  if (n === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < n; i++) {
-    const s = buf.readInt16LE(i * 2) / 32768;
-    sum += s * s;
-  }
-  return Math.sqrt(sum / n);
-}
-
-// Captures both sides of the call as raw PCM and writes a synced stereo WAV:
-// caller on the left channel (raw 16k passthrough), Maya on the right
-// (resampled from her native rate to 16k with linear interpolation so the
-// pitch stays correct). Playable from the admin desk.
 function createRecorder() {
-  const caller = []; // raw 16k PCM16 buffers, caller channel
-  const mayaChunks = []; // raw Maya PCM16 buffers + their source rate
-  let callerSamples = 0; // exact count @16k
-  let mayaSamples = 0; // exact resampled count @16k
+  const caller = [];
+  const mayaChunks = [];
+  let callerSamples = 0;
+  let mayaSamples = 0;
   return {
     caller(base64) {
       const buf = Buffer.from(base64, "base64");
@@ -309,8 +184,8 @@ function createRecorder() {
       header.write("WAVE", 8);
       header.write("fmt ", 12);
       header.writeUInt32LE(16, 16);
-      header.writeUInt16LE(1, 20); // PCM
-      header.writeUInt16LE(2, 22); // stereo
+      header.writeUInt16LE(1, 20);
+      header.writeUInt16LE(2, 22);
       header.writeUInt32LE(TARGET_RATE, 24);
       header.writeUInt32LE(TARGET_RATE * 4, 28);
       header.writeUInt16LE(4, 32);
@@ -319,61 +194,62 @@ function createRecorder() {
       header.writeUInt32LE(dataLength, 40);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, Buffer.concat([header, left, right]));
-      const callId = path.basename(filePath, ".wav");
-      console.log(
-        `[maya] recording ${callId} callerRms=${rmsOf(left).toFixed(4)} mayaRms=${rmsOf(right).toFixed(4)} durationS=${(total / TARGET_RATE).toFixed(1)}`
-      );
     },
   };
 }
 
+function sendJson(ws, payload) {
+  if (ws.readyState === ws.OPEN) {
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch {
+      /* socket already closing */
+    }
+  }
+}
+
 export async function attachLiveSession(clientWs, { timezone } = {}) {
-  const { ws: gemini, model } = await connectWithFallback();
+  const apiKey = activeApiKey();
+  if (!apiKey) {
+    throw new Error(
+      "Voice AI server key (GEMINI_API_KEY) is not configured yet. Please ensure GEMINI_API_KEY is set in your server environment or Secrets, or call +91 77389 68210."
+    );
+  }
+
+  const model = process.env.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL;
+  const voiceName = process.env.GEMINI_VOICE || DEFAULT_VOICE;
+
+  const ai = new GoogleGenAI({
+    apiKey,
+    apiVersion: "v1beta",
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
+    },
+  });
+
   const call = db.createCall({ model });
   const recorder = createRecorder();
-  clientWs.send(JSON.stringify({ type: "ready", callId: call.id, model }));
 
-  // Noise gate (defense-in-depth vs. background-noise false triggers): raw mic
-  // audio only reaches Gemini while a caller turn is active. The recorder still
-  // captures every packet so the WAV stays complete either way.
-  let callerTurn = false;
-  let lastActivityEndAt = 0;
-  let graceDeadline = 0; // keep forwarding briefly after turn end (word tails)
-  const gateStats = { activityStarts: 0, audioForwarded: 0, audioSuppressed: 0 };
-
-  const kickoff = {
-    clientContent: {
-      turns: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: `A new website visitor just tapped the booking bubble. Timezone guess: ${timezone || "Europe/London"}. Greet them as Maya and start helping. Do not wait for more text.`,
-            },
-          ],
-        },
-      ],
-      turnComplete: true,
-    },
-  };
-  gemini.send(JSON.stringify(kickoff));
-
+  let session = null;
   let closed = false;
-  // Hard call-length cap timers (API cost control) + Maya's own hangup timer.
   let timeLimitTimer = null;
   let hardStopTimer = null;
   let mayaHangupTimer = null;
+
   const closeBoth = (reason) => {
     if (closed) return;
     closed = true;
     if (timeLimitTimer) clearTimeout(timeLimitTimer);
     if (hardStopTimer) clearTimeout(hardStopTimer);
     if (mayaHangupTimer) clearTimeout(mayaHangupTimer);
-    console.log(`[maya] call ${call.id} gate stats`, gateStats);
+
     db.patchCall(call.id, {
       status: "completed",
       endedAt: new Date().toISOString(),
     });
+
     if (recorder.hasAudio()) {
       try {
         const file = path.join(process.cwd(), "data", "recordings", `${call.id}.wav`);
@@ -383,13 +259,10 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
         console.warn(`[maya] recording save failed: ${err.message}`);
       }
     }
+
+    sendJson(clientWs, { type: "ended", reason: reason || "done" });
     try {
-      clientWs.send(JSON.stringify({ type: "ended", reason: reason || "done" }));
-    } catch {
-      /* ignore */
-    }
-    try {
-      gemini.close();
+      session?.close();
     } catch {
       /* ignore */
     }
@@ -400,216 +273,246 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
     }
   };
 
-  gemini.on("message", async (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
-    if (msg.error) {
-      clientWs.send(JSON.stringify({ type: "error", message: msg.error.message }));
-      return;
-    }
-    const sc = msg.serverContent;
-    if (sc?.interrupted) {
-      clientWs.send(JSON.stringify({ type: "interrupted" }));
-    }
-    if (sc?.modelTurn?.parts) {
-      for (const part of sc.modelTurn.parts) {
-        if (part.inlineData?.data) {
-          recorder.maya(part.inlineData.data, part.inlineData.mimeType);
-          publish(call.id, "maya", part.inlineData.data, 24000);
-          clientWs.send(
-            JSON.stringify({
-              type: "audio",
-              mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000",
-              data: part.inlineData.data,
-            })
-          );
-        }
-        if (part.text) {
-          db.appendTranscript(call.id, {
-            role: "maya",
-            text: part.text,
-            at: new Date().toISOString(),
-          });
-          clientWs.send(JSON.stringify({ type: "transcript", role: "maya", text: part.text }));
-        }
-      }
-    }
-    if (sc?.inputTranscription?.text) {
-      db.appendTranscript(call.id, {
-        role: "caller",
-        text: sc.inputTranscription.text,
-        at: new Date().toISOString(),
-        partial: !sc.inputTranscription.finished,
-      });
-      clientWs.send(
-        JSON.stringify({
-          type: "transcript",
-          role: "caller",
-          text: sc.inputTranscription.text,
-        })
-      );
-    }
-    if (sc?.outputTranscription?.text) {
-      db.appendTranscript(call.id, {
-        role: "maya",
-        text: sc.outputTranscription.text,
-        at: new Date().toISOString(),
-        partial: !sc.outputTranscription.finished,
-      });
-      clientWs.send(
-        JSON.stringify({
-          type: "transcript",
-          role: "maya",
-          text: sc.outputTranscription.text,
-        })
-      );
-    }
-    if (sc?.turnComplete) {
-      clientWs.send(JSON.stringify({ type: "turnComplete" }));
-    }
-    if (msg.toolCall?.functionCalls) {
-      const functionResponses = [];
-      let endCallRequested = false;
-      for (const fc of msg.toolCall.functionCalls) {
-        let result;
-        try {
-          result = await runTool(fc.name, fc.args || {}, call.id);
-        } catch (err) {
-          result = { ok: false, error: err.message };
-        }
-        clientWs.send(JSON.stringify({ type: "tool", name: fc.name, result }));
-        if (fc.name === "end_call") endCallRequested = true;
-        functionResponses.push({
-          id: fc.id,
-          name: fc.name,
-          response: { result },
-        });
-      }
-      gemini.send(JSON.stringify({ toolResponse: { functionResponses } }));
-      if (endCallRequested) {
-        // Give Maya's goodbye line time to play before actually closing.
-        mayaHangupTimer = setTimeout(() => closeBoth("maya_hangup"), 1200);
-      }
-    }
-  });
+  try {
+    session = await ai.live.connect({
+      model,
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName },
+          },
+        },
+        systemInstruction: activeSystemPrompt(),
+        tools: [{ functionDeclarations: LIVE_FUNCTION_DECLARATIONS }],
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+      },
+      callbacks: {
+        onmessage: async (msg) => {
+          if (closed) return;
+          try {
+            const sc = msg.serverContent;
+            if (sc?.interrupted) {
+              sendJson(clientWs, { type: "interrupted" });
+            }
 
-  gemini.on("close", () => closeBoth("gemini_closed"));
-  gemini.on("error", (err) => {
+            if (sc?.modelTurn?.parts) {
+              for (const part of sc.modelTurn.parts) {
+                if (part.inlineData?.data) {
+                  const mimeType = part.inlineData.mimeType || "audio/pcm;rate=24000";
+                  recorder.maya(part.inlineData.data, mimeType);
+                  publish(call.id, "maya", part.inlineData.data, 24000);
+                  sendJson(clientWs, {
+                    type: "audio",
+                    mimeType,
+                    data: part.inlineData.data,
+                  });
+                }
+                if (part.text && !part.thought) {
+                  db.appendTranscript(call.id, {
+                    role: "maya",
+                    text: part.text,
+                    at: new Date().toISOString(),
+                  });
+                  sendJson(clientWs, {
+                    type: "transcript",
+                    role: "maya",
+                    text: part.text,
+                    finished: false,
+                  });
+                }
+              }
+            }
+
+            if (sc?.inputTranscription?.text) {
+              db.appendTranscript(call.id, {
+                role: "caller",
+                text: sc.inputTranscription.text,
+                at: new Date().toISOString(),
+                partial: !sc.inputTranscription.finished,
+              });
+              sendJson(clientWs, {
+                type: "transcript",
+                role: "caller",
+                text: sc.inputTranscription.text,
+                finished: Boolean(sc.inputTranscription.finished),
+              });
+            }
+
+            if (sc?.outputTranscription?.text) {
+              db.appendTranscript(call.id, {
+                role: "maya",
+                text: sc.outputTranscription.text,
+                at: new Date().toISOString(),
+                partial: !sc.outputTranscription.finished,
+              });
+              sendJson(clientWs, {
+                type: "transcript",
+                role: "maya",
+                text: sc.outputTranscription.text,
+                finished: Boolean(sc.outputTranscription.finished),
+              });
+            }
+
+            if (sc?.turnComplete) {
+              sendJson(clientWs, { type: "turnComplete" });
+            }
+
+            if (msg.toolCall?.functionCalls?.length) {
+              const functionResponses = [];
+              let endCallRequested = false;
+              for (const fc of msg.toolCall.functionCalls) {
+                let result;
+                try {
+                  result = await runTool(fc.name, fc.args || {}, call.id);
+                } catch (err) {
+                  result = { ok: false, error: err instanceof Error ? err.message : String(err) };
+                }
+                sendJson(clientWs, { type: "tool", name: fc.name, result });
+                if (fc.name === "end_call") endCallRequested = true;
+                functionResponses.push({
+                  id: fc.id,
+                  name: fc.name,
+                  response: { result },
+                });
+              }
+              session?.sendToolResponse({ functionResponses });
+              if (endCallRequested) {
+                mayaHangupTimer = setTimeout(() => closeBoth("maya_hangup"), 2500);
+              }
+            }
+          } catch (err) {
+            console.error("[maya] message handler error:", err);
+          }
+        },
+        onerror: (err) => {
+          const message = err?.message || "Voice connection interrupted.";
+          console.error("[maya] Gemini Live error:", message);
+          sendJson(clientWs, { type: "error", message });
+          closeBoth("gemini_error");
+        },
+        onclose: () => {
+          closeBoth("gemini_closed");
+        },
+      },
+    });
+  } catch (err) {
+    db.patchCall(call.id, {
+      status: "completed",
+      endedAt: new Date().toISOString(),
+      summary: `Connection failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+    throw err;
+  }
+
+  sendJson(clientWs, { type: "ready", callId: call.id, model, voice: voiceName });
+
+  // Kick off Maya's warm greeting right away.
+  try {
+    session.sendClientContent({
+      turns: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: `A visitor just connected to the Smile Masters & Jaw Joint Matters voice assistant (timezone: ${
+                timezone || "Asia/Kolkata"
+              }). Greet them warmly in 1–2 short spoken sentences as Maya and ask how you can help.`,
+            },
+          ],
+        },
+      ],
+      turnComplete: true,
+    });
+  } catch (err) {
+    console.warn("[maya] kickoff send failed:", err);
+  }
+
+  // Cost/safety cap: 4 minutes max per session.
+  timeLimitTimer = setTimeout(() => {
     try {
-      clientWs.send(JSON.stringify({ type: "error", message: err.message }));
+      session?.sendClientContent({
+        turns: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: "The call has reached its time limit. Say one brief warm goodbye and call end_call.",
+              },
+            ],
+          },
+        ],
+        turnComplete: true,
+      });
     } catch {
       /* ignore */
     }
-    closeBoth("gemini_error");
-  });
-
-  // Hard 2-minute cap (API cost control): at 100s ask Gemini to wrap up with a
-  // one-line goodbye + end_call; at 120s force-close no matter what.
-  timeLimitTimer = setTimeout(() => {
-    try {
-      gemini.send(
-        JSON.stringify({
-          clientContent: {
-            turns: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    text: "The call has reached its time limit. Say ONE short warm goodbye line (under 10 words) and immediately call the end_call tool.",
-                  },
-                ],
-              },
-            ],
-            turnComplete: true,
-          },
-        })
-      );
-    } catch {
-      /* ignore — hard stop is coming anyway */
-    }
-  }, 100_000);
-  hardStopTimer = setTimeout(() => closeBoth("max_duration"), 120_000);
+  }, 220_000);
+  hardStopTimer = setTimeout(() => closeBoth("max_duration"), 240_000);
 
   clientWs.on("message", (raw) => {
+    if (closed || !session) return;
     let msg;
     try {
       msg = JSON.parse(raw.toString());
     } catch {
       return;
     }
-    if (msg.type === "audio" && msg.data) {
-      // Live monitor + recording always get everything; only the model is gated.
+
+    if (msg.type === "audio" && typeof msg.data === "string" && msg.data.length > 0) {
       publish(call.id, "caller", msg.data, 16000);
       recorder.caller(msg.data);
-      if (callerTurn || Date.now() < graceDeadline) {
-        gateStats.audioForwarded++;
-        gemini.send(
-          JSON.stringify({
-            realtimeInput: {
-              audio: {
-                data: msg.data,
-                mimeType: "audio/pcm;rate=16000",
-              },
-            },
-          })
-        );
-      } else {
-        gateStats.audioSuppressed++;
-      }
-    }
-    if (msg.type === "text" && msg.text) {
-      gemini.send(JSON.stringify({ realtimeInput: { text: String(msg.text).slice(0, 500) } }));
-    }
-    if (msg.type === "pointer" && msg.text) {
-      // Silent context: what the caller's cursor is hovering over on the page.
-      // Never acknowledged aloud unless the caller asks about it.
-      gemini.send(
-        JSON.stringify({
-          clientContent: {
-            turns: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    text: `[Context — do not speak about this note itself] The caller's cursor is now pointing at this part of the website: "${String(msg.text).slice(0, 400)}". If they ask "what is this?" or similar about what they're looking at, explain that thing naturally, briefly, in your own words as Maya. If it's a treatment, describe it simply and offer to book it. Do not interrupt the conversation to announce this.`,
-                  },
-                ],
-              },
-            ],
-            turnComplete: true,
-          },
-        })
-      );
-    }
-    if (msg.type === "activity_start") {
-      gateStats.activityStarts++;
-      // Debounce double-fires right after a turn just ended.
-      if (Date.now() - lastActivityEndAt < 800) return;
-      callerTurn = true;
-      gemini.send(JSON.stringify({ realtimeInput: { activityStart: {} } }));
-    }
-    if (msg.type === "activity_end") {
-      gemini.send(JSON.stringify({ realtimeInput: { activityEnd: {} } }));
-      callerTurn = false;
-      lastActivityEndAt = Date.now();
-      graceDeadline = Date.now() + 350;
-    }
-    if (msg.type === "barge_in") {
-      // Caller is interrupting: reopen the audio gate immediately.
-      callerTurn = true;
-      // Browser playback has already stopped. Audio packets continue immediately,
-      // so Gemini's server-side VAD receives the interruption and cancels its turn.
       try {
-        clientWs.send(JSON.stringify({ type: "interrupted", source: "local_vad" }));
+        session.sendRealtimeInput({
+          audio: {
+            data: msg.data,
+            mimeType: "audio/pcm;rate=16000",
+          },
+        });
+      } catch {
+        /* ignore if closing */
+      }
+    } else if (msg.type === "text" && typeof msg.text === "string" && msg.text.trim()) {
+      const clean = msg.text.trim().slice(0, 600);
+      db.appendTranscript(call.id, {
+        role: "caller",
+        text: clean,
+        at: new Date().toISOString(),
+        partial: false,
+      });
+      sendJson(clientWs, { type: "transcript", role: "caller", text: clean, finished: true });
+      try {
+        session.sendClientContent({
+          turns: [{ role: "user", parts: [{ text: clean }] }],
+          turnComplete: true,
+        });
       } catch {
         /* ignore */
       }
+    } else if (msg.type === "pointer" && typeof msg.text === "string" && msg.text.trim()) {
+      try {
+        session.sendClientContent({
+          turns: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `[Silent page context — do not announce unless asked] The visitor is currently viewing: "${msg.text
+                    .trim()
+                    .slice(0, 320)}".`,
+                },
+              ],
+            },
+          ],
+          turnComplete: false,
+        });
+      } catch {
+        /* ignore */
+      }
+    } else if (msg.type === "end") {
+      closeBoth("client_end");
     }
-    if (msg.type === "end") closeBoth("client_end");
   });
 
   clientWs.on("close", () => closeBoth("client_closed"));

@@ -1,0 +1,10 @@
+{
+  "name": "Smile Masters & Jaw Joint Matters",
+  "description": "Smile Masters & Jaw Joint Matters in Bandra West, Mumbai — TMJ care, orthodontics, dental implants, smile rehabilitation, voice assistant with microphone permission prompt, and live Admin CMS.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

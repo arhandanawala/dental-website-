@@ -1,40 +1,97 @@
 import { useEffect, useRef, useState } from "react";
 import { PcmPlayer, base64ToInt16, downsampleTo16k, int16ToBase64 } from "./audio";
 
-type Phase = "bubble" | "mic" | "connecting" | "live" | "error";
+type Phase = "bubble" | "permission" | "mic" | "connecting" | "live" | "error";
+
+interface CaptionLine {
+  id: number;
+  role: "caller" | "maya" | "system";
+  text: string;
+}
 
 export function Widget() {
   const [phase, setPhase] = useState<Phase>("bubble");
-  const [status, setStatus] = useState("Maya is listening…");
+  const [status, setStatus] = useState("Voice assistant is ready…");
   const [level, setLevel] = useState(0);
   const [hue, setHue] = useState(170);
   const [error, setError] = useState("");
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [captions, setCaptions] = useState<CaptionLine[]>([]);
+  const [textDraft, setTextDraft] = useState("");
+  const [savedNotice, setSavedNotice] = useState("");
+
   const wsRef = useRef<WebSocket | null>(null);
   const playerRef = useRef<PcmPlayer | null>(null);
   const recRef = useRef<AudioContext | null>(null);
   const procRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const mutedRef = useRef(false);
   const levelRef = useRef(0);
-  const bargeFramesRef = useRef(0);
-  const silenceFramesRef = useRef(0);
-  const callerSpeakingRef = useRef(false);
-  const mayaTurnRef = useRef(false);
-  const lastHerAudioAtRef = useRef(0);
-  const ambientRef = useRef(0.012);
-  const speechFramesRef = useRef(0);
-  const suppressAudioUntilRef = useRef(0);
+  const captionIdRef = useRef(1);
+  const captionEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    // Single smoothed updater: level decays, hue slides teal→warm with
-    // activity. Never set these from individual audio packets.
+    mutedRef.current = muted;
+  }, [muted]);
+
+  useEffect(() => {
+    captionEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [captions]);
+
+  useEffect(() => {
+    if (phase !== "live") {
+      levelRef.current = 0;
+      setLevel(0);
+      setHue(170);
+      return;
+    }
     const id = window.setInterval(() => {
-      const lvl = Number.isFinite(levelRef.current) ? Math.max(levelRef.current, 0) : 0;
-      levelRef.current = lvl * 0.92;
-      setLevel(lvl * 0.92);
-      setHue(170 - Math.min(lvl, 1) * 150);
+      const mayaLevel = playerRef.current?.isPlaying()
+        ? Math.min(playerRef.current.level || 0.35, 1)
+        : 0;
+      const lvl = Math.max(
+        Number.isFinite(levelRef.current) ? Math.max(levelRef.current, 0) : 0,
+        mayaLevel
+      );
+      levelRef.current = lvl * 0.88;
+      setLevel(lvl);
+      setHue(170 - Math.min(lvl, 1) * 140);
     }, 80);
     return () => window.clearInterval(id);
+  }, [phase]);
+
+  useEffect(() => {
+    const onOpenRequest = () => {
+      setError("");
+      setPhase("permission");
+    };
+    window.addEventListener("sm:open-voice-assistant", onOpenRequest);
+    return () => window.removeEventListener("sm:open-voice-assistant", onOpenRequest);
   }, []);
+
+  useEffect(() => {
+    if (phase !== "permission") return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPhase("bubble");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [phase]);
+
+  const appendCaption = (role: "caller" | "maya" | "system", text: string, finished = false) => {
+    const clean = text.replace(/\s+/g, " ");
+    if (!clean.trim()) return;
+    setCaptions((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === role && role !== "system" && !finished && last.text.length < 280) {
+        const nextText = (last.text + (last.text.endsWith(" ") || clean.startsWith(" ") ? "" : " ") + clean).trim();
+        return [...prev.slice(0, -1), { ...last, text: nextText }];
+      }
+      const id = captionIdRef.current++;
+      return [...prev.slice(-14), { id, role, text: clean.trim() }];
+    });
+  };
 
   const stopAll = () => {
     try {
@@ -54,310 +111,331 @@ export function Widget() {
     playerRef.current = null;
     levelRef.current = 0;
     setLevel(0);
+    setMicEnabled(false);
+    setMuted(false);
   };
 
-  const startCall = async () => {
-    setError("");
-    // Ask for the microphone first so the browser permission dialog is the
-    // very next thing the caller sees, with clear copy on the panel.
-    setPhase("mic");
-    setStatus("Tap “Allow” on the microphone prompt to talk to Maya.");
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-      });
-    } catch (err) {
-      const denied = err instanceof DOMException && err.name === "NotAllowedError";
-      setError(
-        denied
-          ? "Microphone blocked. Click the mic/lock icon in your address bar, set Microphone to “Allow”, then tap Try again."
-          : "No microphone found. Check that a mic is connected, then tap Try again."
-      );
-      setPhase("error");
-      return;
+  const openBookingFallback = () => {
+    stopAll();
+    setPhase("bubble");
+    const ev = new CustomEvent("sm:open-appointment-modal", { cancelable: true });
+    const notHandledByModal = window.dispatchEvent(ev);
+    if (notHandledByModal) {
+      const section = document.getElementById("book-appointment");
+      if (section) {
+        section.scrollIntoView({ behavior: "smooth" });
+      }
     }
-    setPhase("connecting");
-    setStatus("One sec — putting you through to Maya…");
-    try {
-      streamRef.current = stream;
-      const rec = new AudioContext({ sampleRate: 48000 });
-      recRef.current = rec;
-      const src = rec.createMediaStreamSource(stream);
-      const proc = rec.createScriptProcessor(4096, 1, 1);
-      procRef.current = proc;
-      const mute = rec.createGain();
-      mute.gain.value = 0;
-      src.connect(proc);
-      proc.connect(mute);
-      mute.connect(rec.destination);
+  };
 
-      // Static hosts (GitHub Pages) set window.MOLA_BACKEND to the runtime
-      // server URL; when unset the widget is served same-origin by Node.
-      const backend = (window as any).MOLA_BACKEND || location.origin;
-      const backendUrl = new URL(backend);
+  const startSession = async (withMic: boolean) => {
+    setError("");
+    setSavedNotice("");
+    setCaptions([]);
+    setMuted(false);
+    mutedRef.current = false;
+
+    // Unlock audio playback immediately inside the click gesture.
+    let player: PcmPlayer | null = null;
+    try {
+      player = new PcmPlayer(24000);
+      playerRef.current = player;
+      await player.resume();
+    } catch {
+      player = null;
+    }
+
+    let stream: MediaStream | null = null;
+    if (withMic) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setError(
+          "Microphone access is not available in this browser context. You can still connect in Audio + Text mode below or call +91 77389 68210."
+        );
+        setPhase("error");
+        return;
+      }
+
+      setPhase("mic");
+      setStatus("Please select “Allow” in your browser’s microphone prompt.");
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+          },
+        });
+        setMicEnabled(true);
+      } catch (err) {
+        const name = err instanceof DOMException ? err.name : "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          setError(
+            "Microphone permission was denied. Allow microphone access in your browser bar and tap Try Again, or use Audio + Text mode below."
+          );
+        } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+          setError(
+            "No microphone was detected on this device. Connect a microphone or continue in Audio + Text mode below."
+          );
+        } else {
+          setError(
+            "Could not access microphone right now. Continue in Audio + Text mode or use the appointment form."
+          );
+        }
+        setPhase("error");
+        return;
+      }
+    } else {
+      setMicEnabled(false);
+    }
+
+    setPhase("connecting");
+    setStatus("Connecting to Maya at Smile Masters…");
+
+    try {
+      const backend =
+        (window as unknown as { MOLA_BACKEND?: string }).MOLA_BACKEND || location.origin;
+      const backendUrl = new URL(backend, location.origin);
       const proto = backendUrl.protocol === "https:" ? "wss" : "ws";
-      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata";
       const ws = new WebSocket(
         `${proto}://${backendUrl.host}/ws/live?timezone=${encodeURIComponent(tz)}`
       );
       wsRef.current = ws;
-      const player = new PcmPlayer(24000);
-      playerRef.current = player;
-      await player.resume();
 
-      proc.onaudioprocess = (ev) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        const input = ev.inputBuffer.getChannelData(0);
-        let sum = 0;
-        let clean = true;
-        for (let i = 0; i < input.length; i++) {
-          const s = input[i];
-          if (!Number.isFinite(s)) {
-            clean = false;
-            break;
-          }
-          sum += s * s;
+      if (stream) {
+        streamRef.current = stream;
+        const rec = new AudioContext();
+        recRef.current = rec;
+        if (rec.state === "suspended") {
+          await rec.resume();
         }
-        // Muted tabs / some drivers emit NaN frames — never let those reach
-        // the level or the orb shader turns into a white rectangle.
-        if (!clean) return;
-        const rms = Math.sqrt(sum / input.length);
-        const next = Math.min(rms * 6, 1);
-        const mayaLevel = Number.isFinite(player.level) ? Math.min(player.level, 1) : 0;
-        levelRef.current = Math.max(levelRef.current * 0.6, next, mayaLevel);
-        // HALF-DUPLEX GUARD: the gate stays closed while it is Maya's turn —
-        // either she is audible right now, or her turn is still warm (<4s
-        // since her last audio packet, which covers the pauses between her
-        // sentences where the old isPlaying()-only gate let desk taps read as
-        // a caller turn). Her microphone feed is NEVER forwarded during her
-        // turn — room noise, breath and speaker echo would reach the model,
-        // whose VAD then cancels her turn. Only a genuinely loud, sustained
-        // voice (3 frames above the barge threshold) may interrupt her.
-        const herTurn =
-          player.isPlaying() ||
-          (mayaTurnRef.current && Date.now() - lastHerAudioAtRef.current < 4000);
-        if (herTurn) {
-          if (rms > 0.12) {
-            bargeFramesRef.current += 1;
-            if (bargeFramesRef.current === 3) {
-              suppressAudioUntilRef.current = Date.now() + 500;
-              player.interrupt();
-              setStatus("I’m listening.");
-              ws.send(JSON.stringify({ type: "barge_in" }));
-              callerSpeakingRef.current = true;
-              silenceFramesRef.current = 0;
-              mayaTurnRef.current = false;
-              ws.send(JSON.stringify({ type: "activity_start" }));
-            }
-          } else {
-            bargeFramesRef.current = 0;
+        const src = rec.createMediaStreamSource(stream);
+        const proc = rec.createScriptProcessor(4096, 1, 1);
+        procRef.current = proc;
+        const zeroGain = rec.createGain();
+        zeroGain.gain.value = 0;
+        src.connect(proc);
+        proc.connect(zeroGain);
+        zeroGain.connect(rec.destination);
+
+        proc.onaudioprocess = (ev) => {
+          if (ws.readyState !== WebSocket.OPEN || mutedRef.current) return;
+          const input = ev.inputBuffer.getChannelData(0);
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) {
+            const s = input[i];
+            if (!Number.isFinite(s)) return;
+            sum += s * s;
           }
-          speechFramesRef.current = 0;
+          const rms = Math.sqrt(sum / input.length);
+          const next = Math.min(rms * 5.5, 1);
+          levelRef.current = Math.max(levelRef.current * 0.65, next);
+
+          const pcm = downsampleTo16k(input, rec.sampleRate);
+          if (pcm.length > 0) {
+            ws.send(JSON.stringify({ type: "audio", data: int16ToBase64(pcm) }));
+          }
+        };
+      }
+
+      ws.onmessage = (ev) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
           return;
         }
 
-        // Maya is quiet: adaptive noise-gated caller VAD. The floor tracks
-        // quiet frames (breath/fan hum) so the thresholds ride the room —
-        // speech must clear 3x ambient (>=0.07) and silence sits below 1.5x
-        // ambient (>=0.025).
-        const startThresh = Math.max(0.07, ambientRef.current * 3);
-        const silenceThresh = Math.max(0.025, ambientRef.current * 1.5);
-        if (!callerSpeakingRef.current) {
-          // Sustained-energy requirement: 3 consecutive frames (~255ms) above
-          // startThresh — single taps, puffs and door thumps never qualify.
-          if (rms > startThresh) {
-            speechFramesRef.current += 1;
-            if (speechFramesRef.current >= 3) {
-              callerSpeakingRef.current = true;
-              silenceFramesRef.current = 0;
-              ws.send(JSON.stringify({ type: "activity_start" }));
-            }
-          } else {
-            speechFramesRef.current = 0;
-            // Quiet frame: fold it into the rolling noise-floor estimate.
-            ambientRef.current = ambientRef.current * 0.95 + rms * 0.05;
-          }
-        } else if (rms < silenceThresh) {
-          silenceFramesRef.current += 1;
-          // ~1.9s of true silence before the turn counts as over. Mid-sentence
-          // thinking pauses must NOT hand the turn to Maya — she would start
-          // replying over an unfinished sentence.
-          if (silenceFramesRef.current >= 22) {
-            callerSpeakingRef.current = false;
-            silenceFramesRef.current = 0;
-            speechFramesRef.current = 0;
-            ws.send(JSON.stringify({ type: "activity_end" }));
-          }
-        } else {
-          silenceFramesRef.current = 0;
-        }
-        // Between turns raw noise never reaches Gemini: the mic feed is only
-        // forwarded while the caller is inside an open speech turn.
-        if (callerSpeakingRef.current) {
-          const pcm = downsampleTo16k(input, rec.sampleRate);
-          ws.send(JSON.stringify({ type: "audio", data: int16ToBase64(pcm) }));
-        }
-      };
-
-      ws.onmessage = (ev) => {        const msg = JSON.parse(ev.data);
         if (msg.type === "ready") {
           setPhase("live");
-          setStatus("Maya just picked up. Go ahead, talk like you would on the phone.");
-        }
-        if (msg.type === "audio") {
-          // Maya-turn tracking: her first packet after ready/turnComplete
-          // opens her turn; every packet refreshes the freshness stamp that
-          // keeps the mic gate shut through her between-sentence pauses.
-          lastHerAudioAtRef.current = Date.now();
-          mayaTurnRef.current = true;
-          if (Date.now() < suppressAudioUntilRef.current) return;
-          const rate = /rate=(\d+)/.exec(msg.mimeType || "")?.[1];
-          player.enqueue(base64ToInt16(msg.data), rate ? Number(rate) : 24000);
+          setStatus(
+            withMic
+              ? "Connected · Speak naturally or type below"
+              : "Connected · Type below and hear Maya reply"
+          );
+        } else if (msg.type === "audio" && typeof msg.data === "string") {
+          const mime = typeof msg.mimeType === "string" ? msg.mimeType : "";
+          const rate = /rate=(\d+)/.exec(mime)?.[1];
+          player?.resume().catch(() => undefined);
+          player?.enqueue(base64ToInt16(msg.data), rate ? Number(rate) : 24000);
           levelRef.current = Math.max(levelRef.current, 0.55);
-        }
-        if (msg.type === "turnComplete") {
-          mayaTurnRef.current = false;
-          speechFramesRef.current = 0;
-        }
-        if (msg.type === "interrupted") {
-          mayaTurnRef.current = false;
-          player.interrupt();
-          suppressAudioUntilRef.current = Date.now() + 250;
-          setStatus("I’m listening.");
-        }
-        if (msg.type === "tool" && msg.name === "book_appointment" && msg.result?.ok) {
-          setStatus("Booked. Maya will confirm the time out loud.");
-        }
-        if (msg.type === "error") {
-          setError(msg.message);
+          setStatus("Maya is speaking…");
+        } else if (msg.type === "transcript" && typeof msg.text === "string") {
+          const role = msg.role === "caller" ? "caller" : "maya";
+          appendCaption(role, msg.text, Boolean(msg.finished));
+        } else if (msg.type === "turnComplete") {
+          setStatus(
+            withMic
+              ? mutedRef.current
+                ? "Mic muted · Type or unmute to speak"
+                : "Listening · Speak naturally"
+              : "Listening · Type your message below"
+          );
+        } else if (msg.type === "interrupted") {
+          player?.interrupt();
+          setStatus("Listening…");
+        } else if (msg.type === "tool" && msg.name === "request_appointment_callback") {
+          const res = msg.result as { ok?: boolean } | undefined;
+          if (res?.ok) {
+            setSavedNotice("Appointment request saved to Smile Masters desk.");
+            appendCaption(
+              "system",
+              "Appointment request saved — our Bandra West team will contact you to confirm.",
+              true
+            );
+          }
+        } else if (msg.type === "error") {
+          const errText =
+            typeof msg.message === "string" && msg.message
+              ? msg.message
+              : "Voice assistant encountered a connection error.";
+          setError(errText);
           setPhase("error");
-        }
-        if (msg.type === "ended") {
+          stopAll();
+        } else if (msg.type === "ended") {
           stopAll();
           setPhase("bubble");
         }
       };
+
       ws.onerror = () => {
         setError(
-          "Could not reach Maya. Check your internet connection, then tap Try again."
+          "Could not reach the Voice AI service right now. Please try again, use the appointment form, or call +91 77389 68210."
         );
         setPhase("error");
+        stopAll();
       };
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start the call");
+      setError(err instanceof Error ? err.message : "Could not start voice session.");
       setPhase("error");
+      stopAll();
     }
+  };
+
+  const sendTextMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = textDraft.trim();
+    if (!clean || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    playerRef.current?.resume().catch(() => undefined);
+    wsRef.current.send(JSON.stringify({ type: "text", text: clean }));
+    setTextDraft("");
+    setStatus("Maya is replying…");
   };
 
   const hangUp = () => {
     stopAll();
     setPhase("bubble");
-    setStatus("Maya is listening…");
+    setStatus("Voice assistant is ready…");
   };
-
-  // Pointer awareness: while live, report what the caller is hovering over so
-  // "hey, what is this?" works. Works generically off page headings; explicit
-  // data-maya="Title. Description" attributes win when present.
-  useEffect(() => {
-    if (phase !== "live") return;
-    let last = "";
-    let pendingXY: { x: number; y: number } | null = null;
-    let timer: number | null = null;
-    const describeAt = (x: number, y: number): string => {
-      const el = document.elementFromPoint(x, y) as HTMLElement | null;
-      if (!el || el.closest(".mola-panel, .mola-bubble")) return "";
-      const tagged = el.closest<HTMLElement>("[data-maya]");
-      if (tagged) return tagged.dataset.maya || "";
-      // Images: use alt text, or humanise the filename ("gen_root-canal.jpg"
-      // -> "root canal"). Wrap in the nearest heading if the section has one.
-      const img = el.closest<HTMLElement>("figure")?.querySelector("img") || (el as HTMLImageElement).closest?.("img") || (el.tagName === "IMG" ? (el as HTMLImageElement) : null);
-      if (img) {
-        let what =
-          img.getAttribute("alt")?.trim() ||
-          (decodeURIComponent(img.src.split("/").pop() || "")
-            .replace(/\.(jpg|jpeg|png|webp|svg)(\?.*)?$/i, "")
-            .replace(/^(gen_|gen-|img_|image-)/i, "")
-            .replace(/-\d{3,}x\d{3,}/g, "")
-            .replace(/[-_]+/g, " ")
-            .trim());
-        const parent = img.closest("figure") || img.parentElement;
-        for (let node: HTMLElement | null = parent, depth = 0; node && depth < 5; depth++, node = node.parentElement) {
-          const head = node.querySelector<HTMLElement>("h1, h2, h3, h4");
-          if (head?.textContent?.trim()) {
-            what = what ? `${head.textContent.trim()} — image: ${what}` : head.textContent.trim();
-            break;
-          }
-        }
-        return what ? `an image of ${what}` : "";
-      }
-      for (let node: HTMLElement | null = el, depth = 0; node && depth < 7; depth++, node = node.parentElement) {
-        const head = node.querySelector<HTMLElement>("h1, h2, h3, h4");
-        if (head && head.textContent?.trim()) {
-          const para = node.querySelector<HTMLElement>("p");
-          const snippet = (para?.textContent || "").trim().replace(/\s+/g, " ").slice(0, 220);
-          return `${head.textContent.trim().replace(/\s+/g, " ")}${snippet ? ` — ${snippet}` : ""}`;
-        }
-      }
-      return (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120);
-    };
-    // Maya freezes if a context note arrives mid-sentence (it counts as a new
-    // user turn), so notes are only sent while she is quiet. A note she misses
-    // stays pending and goes out on the first move or gap once she stops.
-    const flush = () => {
-      timer = null;
-      if (!pendingXY) return;
-      if (playerRef.current?.isPlaying()) {
-        if (!timer) timer = window.setTimeout(flush, 250);
-        return;
-      }
-      const text = describeAt(pendingXY.x, pendingXY.y);
-      if (text && text !== last) {
-        last = text;
-        wsRef.current?.send(
-          JSON.stringify({ type: "pointer", text: text.slice(0, 400) })
-        );
-      }
-      pendingXY = null;
-    };
-    const onMove = (e: MouseEvent) => {
-      pendingXY = { x: e.clientX, y: e.clientY };
-      if (timer) return;
-      timer = window.setTimeout(flush, 300);
-    };
-    window.addEventListener("mousemove", onMove, { passive: true });
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [phase]);
 
   if (phase === "bubble") {
     return (
       <button
         className="mola-bubble"
         type="button"
-        onClick={startCall}
-        aria-label="Book an appointment. Start a voice booking with Maya."
+        onClick={() => {
+          setError("");
+          setPhase("permission");
+        }}
+        aria-label="Open Smile Masters Voice Assistant"
       >
         <span className="mola-orb-core" aria-hidden="true">
           <span className="mola-orb-shine" />
         </span>
-        <span className="mola-orb-prompt">Talk to our AI &amp; book a call</span>
+        <span className="mola-orb-prompt">Talk to Maya · Voice AI</span>
       </button>
     );
   }
 
-  return (
-    <div className="mola-panel">
-      <div className="mola-live">
-        <span className="mola-dot" />
-        {phase === "live"
-          ? "Live with Maya"
-          : phase === "mic"
-            ? "Allow microphone"
-            : "Connecting"}
+  if (phase === "permission") {
+    return (
+      <div
+        className="mola-mic-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="sm-mic-dialog-title"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) setPhase("bubble");
+        }}
+      >
+        <div className="mola-mic-modal">
+          <div className="mola-mic-icon" aria-hidden="true">
+            <svg
+              width="28"
+              height="28"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" x2="12" y1="19" y2="22" />
+            </svg>
+          </div>
+          <h3 id="sm-mic-dialog-title" className="mola-mic-title">
+            Talk to Maya — Voice AI Receptionist
+          </h3>
+          <p className="mola-mic-copy">
+            Ask Maya about TMJ &amp; jaw joint care, orthodontics, clear aligners, Dr. Moez &amp;
+            Dr. Laila Khakiani, or request an in-clinic / online consultation in Bandra West.
+          </p>
+          <div className="mola-mic-note">
+            Your microphone is only active while you are on a call and you can mute or end anytime.
+          </div>
+          <div className="mola-mic-actions">
+            <button
+              className="mola-btn primary"
+              type="button"
+              onClick={() => void startSession(true)}
+            >
+              Allow Microphone &amp; Talk
+            </button>
+            <button
+              className="mola-btn ghost"
+              type="button"
+              onClick={() => void startSession(false)}
+            >
+              Start in Audio + Text Mode (No Mic)
+            </button>
+            <button className="mola-btn text" type="button" onClick={openBookingFallback}>
+              Or Use Appointment Request Form
+            </button>
+            <button className="mola-btn text" type="button" onClick={() => setPhase("bubble")}>
+              Close
+            </button>
+          </div>
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="mola-panel" role="region" aria-label="Smile Masters Voice Assistant">
+      <div className="mola-panel-head">
+        <div className="mola-live">
+          <span className={`mola-dot ${phase === "error" ? "is-err" : ""}`} />
+          {phase === "live"
+            ? "Live · Maya Voice AI"
+            : phase === "mic"
+              ? "Requesting Mic"
+              : phase === "error"
+                ? "Voice Assistant"
+                : "Connecting"}
+        </div>
+        <button
+          type="button"
+          className="mola-close-x"
+          onClick={hangUp}
+          aria-label="Close voice assistant"
+        >
+          ×
+        </button>
+      </div>
+
       <div className="mola-orb-wrap">
         <div
           className="vorb"
@@ -372,31 +450,77 @@ export function Widget() {
           <div className="vorb-glow" />
         </div>
       </div>
-      <div className="mola-caption">Voice booking · Walk-in appointment</div>
-      <div className="mola-status">{error || status}</div>
+
+      <div className="mola-caption">Smile Masters &amp; Jaw Joint Matters · Bandra West</div>
+      <div className={`mola-status ${phase === "error" ? "is-error" : ""}`}>{error || status}</div>
+
+      {savedNotice && <div className="mola-saved-pill">{savedNotice}</div>}
+
+      {captions.length > 0 && (
+        <div className="mola-transcript" aria-live="polite">
+          {captions.map((line) => (
+            <div key={line.id} className={`mola-tline is-${line.role}`}>
+              <span className="mola-trole">
+                {line.role === "maya" ? "Maya" : line.role === "caller" ? "You" : "Desk"}
+              </span>
+              <span className="mola-ttext">{line.text}</span>
+            </div>
+          ))}
+          <div ref={captionEndRef} />
+        </div>
+      )}
+
+      {phase === "live" && (
+        <form className="mola-text-form" onSubmit={sendTextMessage}>
+          <input
+            type="text"
+            className="mola-text-input"
+            value={textDraft}
+            onChange={(e) => setTextDraft(e.target.value)}
+            placeholder="Type a question or phone number…"
+            aria-label="Send a message to Maya"
+          />
+          <button type="submit" className="mola-text-send" disabled={!textDraft.trim()}>
+            Send
+          </button>
+        </form>
+      )}
+
       <div className="mola-actions">
         {phase === "error" ? (
           <>
-            <button className="mola-btn primary" type="button" onClick={startCall}>
-              Try again
+            <button
+              className="mola-btn primary"
+              type="button"
+              onClick={() => void startSession(true)}
+            >
+              Try Mic Again
             </button>
-            <button className="mola-btn ghost" type="button" onClick={hangUp}>
-              Close
+            <button
+              className="mola-btn ghost"
+              type="button"
+              onClick={() => void startSession(false)}
+            >
+              Audio + Text
+            </button>
+            <button className="mola-btn ghost" type="button" onClick={openBookingFallback}>
+              Book Form
             </button>
           </>
         ) : (
           <>
+            {micEnabled && (
+              <button
+                className={`mola-btn ${muted ? "primary" : "ghost"}`}
+                type="button"
+                onClick={() => setMuted((m) => !m)}
+              >
+                {muted ? "Unmute Mic" : "Mute Mic"}
+              </button>
+            )}
             <button className="mola-btn danger" type="button" onClick={hangUp}>
-              End call
+              End Call
             </button>
-            <a
-              className="mola-btn ghost"
-              href="https://cal.com/shreyasrajsony11-ukmj10/dental-clinic-test-call"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Pick a time
-            </a>
           </>
         )}
       </div>

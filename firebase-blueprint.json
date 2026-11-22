@@ -1,0 +1,279 @@
+{
+  "entities": {
+    "SiteContent": {
+      "title": "SiteContent",
+      "description": "Global website content, hero copy/images, clinic contact details, FAQs, social links, and notification preferences.",
+      "type": "object",
+      "properties": {
+        "clinicName": { "type": "string" },
+        "tagline": { "type": "string" },
+        "foundedYear": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "openingHours": { "type": "string" },
+        "heroEyebrow": { "type": "string" },
+        "heroHeadline": { "type": "string" },
+        "heroMobileHeadline": { "type": "string" },
+        "heroDescription": { "type": "string" },
+        "heroCtaText": { "type": "string" },
+        "heroCtaLink": { "type": "string" },
+        "heroSecondaryCtaText": { "type": "string" },
+        "heroSecondaryCtaLink": { "type": "string" },
+        "heroDesktopImage": { "type": "string" },
+        "heroMobileImage": { "type": "string" },
+        "aboutEyebrow": { "type": "string" },
+        "aboutHeadline": { "type": "string" },
+        "aboutDescription": { "type": "string" },
+        "doctorsSectionTitle": { "type": "string" },
+        "doctorsSectionSubtitle": { "type": "string" },
+        "treatmentsSectionTitle": { "type": "string" },
+        "treatmentsSectionSubtitle": { "type": "string" },
+        "bookingNotice": { "type": "string" },
+        "footerDescription": { "type": "string" },
+        "socialInstagram": { "type": "string" },
+        "socialFacebook": { "type": "string" },
+        "socialYoutube": { "type": "string" },
+        "socialLinkedin": { "type": "string" },
+        "notificationEmail": { "type": "string" },
+        "notifyOnNewLead": { "type": "boolean" },
+        "notifyOnNewAppointment": { "type": "boolean" },
+        "faqs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question": { "type": "string" },
+              "answer": { "type": "string" }
+            },
+            "required": ["question", "answer"]
+          }
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "clinicName",
+        "phone",
+        "email",
+        "address",
+        "heroHeadline",
+        "heroMobileHeadline",
+        "heroDescription",
+        "heroCtaText",
+        "heroCtaLink",
+        "updatedAt"
+      ]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Doctor profile displayed on the clinic website and managed in Admin CMS.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "credentials": { "type": "string" },
+        "role": { "type": "string" },
+        "bio": { "type": "string" },
+        "specializations": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "experience": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "published": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "name",
+        "credentials",
+        "role",
+        "bio",
+        "specializations",
+        "experience",
+        "photoUrl",
+        "published",
+        "sortOrder",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Treatment": {
+      "title": "Treatment",
+      "description": "Clinical treatment or service offered at Smile Masters & Jaw Joint Matters.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "slug": { "type": "string" },
+        "category": { "type": "string" },
+        "shortDescription": { "type": "string" },
+        "fullDescription": { "type": "string" },
+        "highlights": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "imageUrl": { "type": "string" },
+        "published": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "title",
+        "slug",
+        "category",
+        "shortDescription",
+        "fullDescription",
+        "highlights",
+        "imageUrl",
+        "published",
+        "sortOrder",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Testimonial": {
+      "title": "Testimonial",
+      "description": "Patient testimonial published with explicit patient permission.",
+      "type": "object",
+      "properties": {
+        "reviewerName": { "type": "string" },
+        "reviewerContext": { "type": "string" },
+        "quote": { "type": "string" },
+        "consentConfirmed": { "type": "boolean" },
+        "published": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "reviewerName",
+        "reviewerContext",
+        "quote",
+        "consentConfirmed",
+        "published",
+        "sortOrder",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Lead": {
+      "title": "Lead",
+      "description": "Public website enquiry or callback request stored for admin follow-up.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "enquiryType": { "type": "string" },
+        "treatment": { "type": "string" },
+        "preferredContact": { "type": "string" },
+        "message": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["New", "Contacted", "Follow-up", "Converted", "Closed"]
+        },
+        "notes": { "type": "string" },
+        "sourcePage": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "name",
+        "phone",
+        "email",
+        "enquiryType",
+        "treatment",
+        "preferredContact",
+        "message",
+        "status",
+        "notes",
+        "sourcePage",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Patient appointment request submitted from the public website and reviewed by clinic staff.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "treatment": { "type": "string" },
+        "preferredDate": { "type": "string" },
+        "preferredTime": { "type": "string" },
+        "preferredContact": { "type": "string" },
+        "message": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "Confirmed", "Rescheduled", "Rejected", "Completed"]
+        },
+        "notes": { "type": "string" },
+        "sourcePage": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "name",
+        "phone",
+        "email",
+        "treatment",
+        "preferredDate",
+        "preferredTime",
+        "preferredContact",
+        "message",
+        "status",
+        "notes",
+        "sourcePage",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized clinic administrator account mapped by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "super_admin"] },
+        "addedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayName", "role", "addedBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/siteContent/{docId}": {
+      "schema": { "$ref": "#/entities/SiteContent" },
+      "description": "Singleton site content document ('main') readable publicly and writable only by admins."
+    },
+    "/doctors/{doctorId}": {
+      "schema": { "$ref": "#/entities/Doctor" },
+      "description": "Doctor profiles; published profiles are publicly readable, all profiles are manageable by admins."
+    },
+    "/treatments/{treatmentId}": {
+      "schema": { "$ref": "#/entities/Treatment" },
+      "description": "Clinical treatments; published items are publicly readable, all items are manageable by admins."
+    },
+    "/testimonials/{testimonialId}": {
+      "schema": { "$ref": "#/entities/Testimonial" },
+      "description": "Patient testimonials published with consent; published items are publicly readable, all items are manageable by admins."
+    },
+    "/leads/{leadId}": {
+      "schema": { "$ref": "#/entities/Lead" },
+      "description": "Private enquiries/callback leads; public create-only with strict schema/size checks, admin read/update/delete."
+    },
+    "/appointments/{appointmentId}": {
+      "schema": { "$ref": "#/entities/Appointment" },
+      "description": "Private appointment requests; public create-only with strict schema/size checks, admin read/update/delete."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Admin RBAC registry keyed by Firebase Auth UID; readable by self/admin, writable by admins only."
+    }
+  }
+}
