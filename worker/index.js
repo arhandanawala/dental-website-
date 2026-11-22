@@ -25,8 +25,17 @@ const APPT_STATUSES = new Set(["Pending", "Confirmed", "Rescheduled", "Rejected"
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-// Ephemeral fallback signing key per Worker isolate if SESSION_SECRET is not set in Worker Secrets.
-const FALLBACK_SECRET = crypto.randomUUID() + "-" + crypto.randomUUID();
+// Ephemeral fallback signing key per Worker isolate, initialized lazily inside a request handler
+// (Cloudflare Workers disallows random generation in global module scope).
+let fallbackSecret = null;
+
+function getSigningSecret(env) {
+  if (env?.SESSION_SECRET) return env.SESSION_SECRET;
+  if (!fallbackSecret) {
+    fallbackSecret = crypto.randomUUID() + "-" + crypto.randomUUID();
+  }
+  return fallbackSecret;
+}
 
 // In-memory state (automatically backed by env.SM_KV when a KV binding is configured).
 let memState = null;
@@ -189,7 +198,7 @@ async function pbkdf2Hex(password, salt, iterations = 100000) {
 }
 
 async function signToken(payload, env) {
-  const secret = env?.SESSION_SECRET || FALLBACK_SECRET;
+  const secret = getSigningSecret(env);
   const body = base64UrlEncode(enc.encode(JSON.stringify(payload)));
   const key = await crypto.subtle.importKey(
     "raw",
@@ -206,7 +215,7 @@ async function verifyToken(token, env) {
   if (!token || !token.includes(".")) return null;
   const [body, sigStr] = token.split(".");
   if (!body || !sigStr) return null;
-  const secret = env?.SESSION_SECRET || FALLBACK_SECRET;
+  const secret = getSigningSecret(env);
   const key = await crypto.subtle.importKey(
     "raw",
     enc.encode(secret),
