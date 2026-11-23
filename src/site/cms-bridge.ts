@@ -12,6 +12,7 @@ import { db } from "../lib/firebase";
 import {
   DEFAULT_DOCTORS,
   DEFAULT_SITE_CONTENT,
+  DEFAULT_TESTIMONIALS,
   DEFAULT_TREATMENTS,
 } from "../lib/defaults";
 import type { Doctor, SiteContent, Testimonial, Treatment } from "../lib/types";
@@ -31,7 +32,7 @@ const submitGuard = createCooldownGuard(12_000);
 let currentContent: SiteContent = { ...DEFAULT_SITE_CONTENT };
 let currentDoctors: Doctor[] = DEFAULT_DOCTORS.map((d) => ({ ...d }));
 let currentTreatments: Treatment[] = DEFAULT_TREATMENTS.map((t) => ({ ...t }));
-let currentTestimonials: Testimonial[] = [];
+let currentTestimonials: Testimonial[] = DEFAULT_TESTIMONIALS.map((t) => ({ ...t }));
 let activeCategory = "All";
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -48,6 +49,11 @@ function el<K extends keyof HTMLElementTagNameMap>(
 function phoneToTel(phone: string): string {
   const cleaned = phone.replace(/[^\d+]/g, "");
   return cleaned ? `tel:${cleaned}` : "tel:+917738968210";
+}
+
+function phoneToWhatsAppUrl(raw: string): string {
+  const digits = (raw || "").replace(/\D/g, "");
+  return `https://wa.me/${digits || "917738968210"}`;
 }
 
 function hydrateTextAndLinks(content: SiteContent) {
@@ -73,6 +79,9 @@ function hydrateTextAndLinks(content: SiteContent) {
     doctorsSectionSubtitle: content.doctorsSectionSubtitle,
     treatmentsSectionTitle: content.treatmentsSectionTitle,
     treatmentsSectionSubtitle: content.treatmentsSectionSubtitle,
+    testimonialsSectionEyebrow: content.testimonialsSectionEyebrow,
+    testimonialsSectionTitle: content.testimonialsSectionTitle,
+    testimonialsSectionNote: content.testimonialsSectionNote,
     bookingNotice: content.bookingNotice,
     footerDescription: content.footerDescription,
   };
@@ -84,6 +93,12 @@ function hydrateTextAndLinks(content: SiteContent) {
     if (val) node.textContent = val;
   });
 
+  const waHref = phoneToWhatsAppUrl(content.whatsappNumber || content.phone);
+  const mapsHref =
+    content.googleMapsUrl && isSafeHref(content.googleMapsUrl)
+      ? content.googleMapsUrl
+      : DEFAULT_SITE_CONTENT.googleMapsUrl;
+
   document.querySelectorAll<HTMLAnchorElement>("[data-cms-href]").forEach((anchor) => {
     const key = anchor.dataset.cmsHref;
     if (!key) return;
@@ -91,6 +106,10 @@ function hydrateTextAndLinks(content: SiteContent) {
       anchor.href = phoneToTel(content.phone);
     } else if (key === "email") {
       anchor.href = `mailto:${content.email}`;
+    } else if (key === "whatsapp") {
+      anchor.href = waHref;
+    } else if (key === "googleMaps" && isSafeHref(mapsHref)) {
+      anchor.href = mapsHref;
     } else if (key === "heroCtaLink" && isSafeHref(content.heroCtaLink)) {
       anchor.href = content.heroCtaLink;
     } else if (key === "heroSecondaryCtaLink" && isSafeHref(content.heroSecondaryCtaLink)) {
@@ -105,6 +124,37 @@ function hydrateTextAndLinks(content: SiteContent) {
       }
     }
   });
+
+  // Also keep static WhatsApp & Google Maps action buttons in sync with CMS edits
+  document.querySelectorAll<HTMLAnchorElement>('a[href*="wa.me"]').forEach((anchor) => {
+    anchor.href = waHref;
+  });
+  if (isSafeHref(mapsHref)) {
+    document.querySelectorAll<HTMLAnchorElement>('a[href*="maps.app.goo.gl"]').forEach((anchor) => {
+      anchor.href = mapsHref;
+    });
+  }
+
+  // Hydrate brand logo everywhere when a custom logoUrl is set in Admin
+  const customLogo = content.logoUrl && isSafeImageSrc(content.logoUrl) ? content.logoUrl : "";
+  const logoAlt = content.logoAlt || content.clinicName || DEFAULT_SITE_CONTENT.logoAlt;
+  document
+    .querySelectorAll<HTMLImageElement>(
+      '.logo_image, .navbar-logo-image, .brand_logo, .footer-logo_image, [data-cms-img="logoUrl"]'
+    )
+    .forEach((img) => {
+      if (logoAlt) img.alt = logoAlt;
+      if (customLogo) {
+        img.src = customLogo;
+        img.removeAttribute("srcset");
+        const picture = img.closest("picture");
+        if (picture) {
+          picture.querySelectorAll("source").forEach((source) => {
+            source.setAttribute("srcset", customLogo);
+          });
+        }
+      }
+    });
 
   document.querySelectorAll<HTMLImageElement>("[data-cms-img]").forEach((img) => {
     const key = img.dataset.cmsImg;
@@ -295,60 +345,136 @@ function renderFaqs(content: SiteContent) {
   });
 }
 
-function renderTestimonials(items: Testimonial[]) {
+function renderTestimonials(items: Testimonial[], content: SiteContent) {
   const containers = document.querySelectorAll<HTMLElement>("[data-cms-testimonials]");
   if (!containers.length) return;
+
   const visible = [...items]
     .filter((t) => t.published && t.consentConfirmed)
     .sort((a, b) => a.sortOrder - b.sortOrder);
 
+  const gallery = (content.caseGalleryImages || []).filter(
+    (g) => g && g.imageUrl && isSafeImageSrc(g.imageUrl)
+  );
+
+  const photoOnlyReviews = visible.filter(
+    (t) => t.imageUrl && isSafeImageSrc(t.imageUrl) && !t.quote?.trim()
+  );
+  const writtenReviews = visible.filter((t) => Boolean(t.quote?.trim()));
+
+  const mapsUrl =
+    content.googleMapsUrl && isSafeHref(content.googleMapsUrl)
+      ? content.googleMapsUrl
+      : DEFAULT_SITE_CONTENT.googleMapsUrl;
+
   containers.forEach((container) => {
-    if (!visible.length) {
-      // Preserve curated static verified review cards if already present in HTML
-      if (container.querySelector(".sm-verified-reviews-shell")) return;
-      container.replaceChildren();
+    container.replaceChildren();
+
+    if (!gallery.length && !photoOnlyReviews.length && !writtenReviews.length) {
       const notice = el("div", "sm-testimonial-placeholder");
       notice.appendChild(
-        el(
-          "h3",
-          "sm-placeholder-title",
-          "Patient Stories Published Only With Explicit Consent"
-        )
+        el("h3", "sm-placeholder-title", "Verified Patient Stories")
       );
       notice.appendChild(
         el(
           "p",
           "sm-placeholder-copy",
-          "Verified patient feedback added with permission by the clinic team in the Admin CMS will appear here."
+          "Patient stories and smile transformations are published with explicit patient consent."
         )
       );
       container.appendChild(notice);
       return;
     }
 
-    let extraWrap = container.querySelector<HTMLElement>("[data-cms-testimonials-live]");
-    if (!extraWrap) {
-      if (!container.querySelector(".sm-verified-reviews-shell")) {
-        container.replaceChildren();
-      }
-      extraWrap = el("div", "sm-testimonials-grid");
-      extraWrap.setAttribute("data-cms-testimonials-live", "true");
-      container.appendChild(extraWrap);
-    } else {
-      extraWrap.replaceChildren();
+    const shell = el("div", "sm-verified-reviews-shell");
+
+    if (gallery.length > 0) {
+      const casesGrid = el("div", "sm-cases-grid");
+      gallery.forEach((item, idx) => {
+        const card = el("div", "sm-case-card");
+        const img = el("img", "sm-case-img");
+        img.src = item.imageUrl;
+        img.loading = "lazy";
+        img.alt = item.caption || `Smile Masters patient transformation ${idx + 1}`;
+        card.appendChild(img);
+        casesGrid.appendChild(card);
+      });
+      shell.appendChild(casesGrid);
     }
 
-    visible.forEach((t) => {
-      const card = el("blockquote", "sm-testimonial-card");
-      card.appendChild(el("p", "sm-testimonial-quote", `“${t.quote}”`));
-      const footer = el("footer", "sm-testimonial-author");
-      footer.appendChild(el("strong", "", t.reviewerName));
-      if (t.reviewerContext) {
-        footer.appendChild(el("span", "", ` · ${t.reviewerContext}`));
-      }
-      card.appendChild(footer);
-      extraWrap.appendChild(card);
-    });
+    if (photoOnlyReviews.length > 0) {
+      const row = el("div", "sm-reviews-row");
+      photoOnlyReviews.forEach((t) => {
+        const card = el("div", "sm-review-shot-card");
+        const img = el("img", "sm-review-shot-img");
+        img.src = t.imageUrl || "";
+        img.loading = "lazy";
+        img.alt = `${t.reviewerName}${t.reviewerContext ? ` — ${t.reviewerContext}` : ""}`;
+        card.appendChild(img);
+        row.appendChild(card);
+      });
+      shell.appendChild(row);
+    }
+
+    if (writtenReviews.length > 0) {
+      const grid = el("div", "sm-testimonials-grid");
+      grid.setAttribute("data-cms-testimonials-live", "true");
+      writtenReviews.forEach((t) => {
+        const card = el("blockquote", "sm-testimonial-card");
+
+        if (t.imageUrl && isSafeImageSrc(t.imageUrl)) {
+          const photoWrap = el("div", "sm-testimonial-photo-wrap");
+          const img = el("img", "sm-testimonial-photo");
+          img.src = t.imageUrl;
+          img.loading = "lazy";
+          img.alt = `${t.reviewerName} review image`;
+          photoWrap.appendChild(img);
+          card.appendChild(photoWrap);
+        }
+
+        const starsCount = Math.min(5, Math.max(1, Math.round(Number(t.rating) || 5)));
+        const metaTop = el("div", "sm-testimonial-meta-top");
+        const stars = el(
+          "div",
+          "sm-testimonial-stars",
+          `${"★".repeat(starsCount)}${"☆".repeat(5 - starsCount)}`
+        );
+        stars.setAttribute("aria-label", `${starsCount} out of 5 stars`);
+        metaTop.appendChild(stars);
+        if (t.source) {
+          metaTop.appendChild(el("span", "sm-testimonial-source", t.source));
+        }
+        card.appendChild(metaTop);
+
+        card.appendChild(el("p", "sm-testimonial-quote", `“${t.quote.trim()}”`));
+
+        const footer = el("footer", "sm-testimonial-author");
+        footer.appendChild(el("strong", "", t.reviewerName));
+        if (t.reviewerContext) {
+          footer.appendChild(el("span", "", ` · ${t.reviewerContext}`));
+        }
+        card.appendChild(footer);
+        grid.appendChild(card);
+      });
+      shell.appendChild(grid);
+    }
+
+    const footerBar = el("div", "sm-reviews-footer");
+    footerBar.appendChild(
+      el(
+        "span",
+        "sm-reviews-note",
+        content.testimonialsSectionNote || DEFAULT_SITE_CONTENT.testimonialsSectionNote
+      )
+    );
+    const link = el("a", "sm-reviews-link", "Read More Reviews on Google →");
+    link.href = mapsUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    footerBar.appendChild(link);
+    shell.appendChild(footerBar);
+
+    container.appendChild(shell);
   });
 }
 
@@ -871,7 +997,7 @@ async function loadLiveCmsData() {
       renderDoctors(currentDoctors);
       renderTreatments(currentTreatments);
       renderFaqs(currentContent);
-      renderTestimonials(currentTestimonials);
+      renderTestimonials(currentTestimonials, currentContent);
       return;
     }
   } catch {
@@ -912,7 +1038,7 @@ async function loadLiveCmsData() {
     renderDoctors(currentDoctors);
     renderTreatments(currentTreatments);
     renderFaqs(currentContent);
-    renderTestimonials(currentTestimonials);
+    renderTestimonials(currentTestimonials, currentContent);
   } catch (err) {
     console.warn("Using verified static defaults while live CMS sync initializes:", err);
   }
@@ -923,7 +1049,7 @@ function init() {
   renderDoctors(currentDoctors);
   renderTreatments(currentTreatments);
   renderFaqs(currentContent);
-  renderTestimonials(currentTestimonials);
+  renderTestimonials(currentTestimonials, currentContent);
   bindExistingFormsAndTriggers();
   void loadLiveCmsData();
 }

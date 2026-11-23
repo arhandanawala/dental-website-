@@ -146,15 +146,17 @@ export function OverviewTab({
         </div>
 
         <div className="lg:col-span-2 bg-panel border border-line rounded-2xl p-5 space-y-3">
-          <h3 className="text-sm font-semibold text-ink">Quick Actions</h3>
+          <h3 className="text-sm font-semibold text-ink">Quick Website &amp; Clinic Pages</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {[
-              { tab: "appointments", title: "Review Appointment Requests", desc: `${pendingAppts} pending patient request(s)` },
-              { tab: "leads", title: "Manage Enquiries & Callbacks", desc: `${newLeads} new lead(s) awaiting response` },
-              { tab: "voice", title: "Maya Voice AI Calls", desc: "Review transcripts, audio & customize Maya script" },
+              { tab: "branding", title: "Logo, Branding & Hero", desc: "Upload logo, edit headlines & desktop/mobile hero photos" },
+              { tab: "about", title: "About Page & Headings", desc: "Edit clinic story, section subtitles & footer text" },
+              { tab: "contact", title: "Contact, WhatsApp & FAQs", desc: "Phone, WhatsApp, address, maps link & FAQs" },
+              { tab: "testimonials", title: "Testimonials & Smile Gallery", desc: `${publishedTestimonials} live review(s) + ${(siteContent.caseGalleryImages || []).length} smile photos` },
               { tab: "doctors", title: "Edit Doctors & Bios", desc: "Upload photos, edit M.D.S. profiles & order" },
               { tab: "treatments", title: "Manage Treatments", desc: "Update TMJ, orthodontics & dental services" },
-              { tab: "content", title: "Edit Hero, Contact & FAQs", desc: "Update desktop/mobile headlines & hours" },
+              { tab: "appointments", title: "Appointment Requests", desc: `${pendingAppts} pending patient request(s)` },
+              { tab: "voice", title: "Maya Voice AI Calls", desc: "Review transcripts, audio & customize Maya script" },
             ].map((action) => (
               <button
                 key={action.tab}

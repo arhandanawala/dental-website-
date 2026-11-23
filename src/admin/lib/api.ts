@@ -242,6 +242,13 @@ export function deleteTestimonial(id: string) {
   });
 }
 
+export function reorderTestimonials(ids: string[]) {
+  return request<{ ok: boolean; testimonials: Testimonial[] }>("/api/admin/testimonials/reorder", {
+    method: "PUT",
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export function updateLead(id: string, patch: { status?: LeadStatus; notes?: string }) {
   return request<{ ok: boolean; lead: Lead }>(`/api/admin/leads/${encodeURIComponent(id)}`, {
     method: "PATCH",

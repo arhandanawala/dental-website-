@@ -137,3 +137,31 @@ test("reorderItems moves items up and down and normalizes sortOrder", () => {
   );
   assert.equal(slugify("TMJ & Jaw Joint Disorders!"), "tmj-jaw-joint-disorders");
 });
+
+test("Admin multi-page router resolves and builds dedicated /admin/* paths", async () => {
+  const { ADMIN_ROUTES, getAdminPath, resolveAdminRoute, getAdminRouteMeta } = await import(
+    "../admin/lib/routes.ts"
+  );
+
+  assert.equal(getAdminPath("overview"), "/admin/");
+  assert.equal(getAdminPath("branding"), "/admin/branding");
+  assert.equal(getAdminPath("about"), "/admin/about");
+  assert.equal(getAdminPath("contact"), "/admin/contact");
+  assert.equal(getAdminPath("testimonials"), "/admin/testimonials");
+  assert.equal(getAdminPath("admins"), "/admin/credentials");
+
+  assert.equal(resolveAdminRoute("/admin"), "overview");
+  assert.equal(resolveAdminRoute("/admin/"), "overview");
+  assert.equal(resolveAdminRoute("/admin/branding"), "branding");
+  assert.equal(resolveAdminRoute("/admin/branding/"), "branding");
+  assert.equal(resolveAdminRoute("/admin/testimonials?foo=1"), "testimonials");
+  assert.equal(resolveAdminRoute("/admin/credentials"), "admins");
+  assert.equal(resolveAdminRoute("/admin/unknown-page"), "overview");
+
+  for (const route of ADMIN_ROUTES) {
+    const path = getAdminPath(route.key);
+    assert.equal(resolveAdminRoute(path), route.key);
+    assert.equal(getAdminRouteMeta(route.key).key, route.key);
+  }
+});
+

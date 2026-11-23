@@ -1,6 +1,8 @@
 import {
+  DEFAULT_CASE_GALLERY,
   DEFAULT_DOCTORS,
   DEFAULT_SITE_CONTENT,
+  DEFAULT_TESTIMONIALS,
   DEFAULT_TREATMENTS,
   MAYA_SYSTEM_PROMPT_TEXT,
 } from "../server/cms-defaults.js";
@@ -45,7 +47,8 @@ function createInitialState() {
     siteContent: structuredClone(DEFAULT_SITE_CONTENT),
     doctors: structuredClone(DEFAULT_DOCTORS),
     treatments: structuredClone(DEFAULT_TREATMENTS),
-    testimonials: [],
+    testimonials: structuredClone(DEFAULT_TESTIMONIALS),
+    testimonialsInitialized: true,
     leads: [],
     appointments: [],
     calls: [],
@@ -59,10 +62,23 @@ async function loadState(env) {
     try {
       const raw = await env.SM_KV.get("sm_state_v1", "json");
       if (raw && typeof raw === "object") {
+        const rawReviews = Array.isArray(raw.testimonials) ? raw.testimonials : [];
+        const testimonials =
+          !raw.testimonialsInitialized && rawReviews.length === 0
+            ? structuredClone(DEFAULT_TESTIMONIALS)
+            : rawReviews;
         memState = {
           ...createInitialState(),
           ...raw,
-          siteContent: { ...DEFAULT_SITE_CONTENT, ...(raw.siteContent || {}) },
+          testimonials,
+          testimonialsInitialized: true,
+          siteContent: {
+            ...DEFAULT_SITE_CONTENT,
+            ...(raw.siteContent || {}),
+            caseGalleryImages: Array.isArray(raw.siteContent?.caseGalleryImages)
+              ? raw.siteContent.caseGalleryImages
+              : structuredClone(DEFAULT_CASE_GALLERY),
+          },
           adminCredentials: raw.adminCredentials || { ...DEFAULT_ADMIN_AUTH },
         };
         return memState;
@@ -345,7 +361,7 @@ function getPublicSnapshot(state) {
       .filter((t) => t.published !== false)
       .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0)),
     testimonials: [...state.testimonials]
-      .filter((t) => t.published !== false && t.verifiedConsent !== false)
+      .filter((t) => t.published !== false && t.consentConfirmed !== false)
       .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0)),
   };
 }
@@ -1029,26 +1045,39 @@ export default {
       }
 
       if (pathname === "/api/admin/seed-defaults" && method === "POST") {
-        let doctorsAdded = 0;
-        let treatmentsAdded = 0;
+        let created = 0;
         for (const doc of DEFAULT_DOCTORS) {
           if (!state.doctors.some((d) => d.id === doc.id)) {
             state.doctors.push(structuredClone(doc));
-            doctorsAdded++;
+            created++;
           }
         }
         for (const tr of DEFAULT_TREATMENTS) {
           if (!state.treatments.some((t) => t.id === tr.id)) {
             state.treatments.push(structuredClone(tr));
-            treatmentsAdded++;
+            created++;
           }
         }
-        state.siteContent = { ...DEFAULT_SITE_CONTENT, ...(state.siteContent || {}) };
+        for (const rev of DEFAULT_TESTIMONIALS) {
+          if (!state.testimonials.some((r) => r.id === rev.id)) {
+            state.testimonials.push(structuredClone(rev));
+            created++;
+          }
+        }
+        state.testimonialsInitialized = true;
+        state.siteContent = {
+          ...DEFAULT_SITE_CONTENT,
+          ...(state.siteContent || {}),
+          caseGalleryImages:
+            Array.isArray(state.siteContent?.caseGalleryImages) &&
+            state.siteContent.caseGalleryImages.length > 0
+              ? state.siteContent.caseGalleryImages
+              : structuredClone(DEFAULT_CASE_GALLERY),
+        };
         await saveState(env, state);
         return jsonResponse({
           ok: true,
-          doctorsAdded,
-          treatmentsAdded,
+          created,
           snapshot: getAdminSnapshot(state, env),
         });
       }
@@ -1060,7 +1089,9 @@ export default {
           "clinicName",
           "tagline",
           "foundedYear",
+          "logoAlt",
           "phone",
+          "whatsappNumber",
           "email",
           "address",
           "city",
@@ -1078,16 +1109,20 @@ export default {
           "doctorsSectionSubtitle",
           "treatmentsSectionTitle",
           "treatmentsSectionSubtitle",
+          "testimonialsSectionEyebrow",
+          "testimonialsSectionTitle",
+          "testimonialsSectionNote",
           "bookingNotice",
           "footerDescription",
           "notificationEmail",
         ];
         for (const f of strFields) {
-          if (f in body) next[f] = cleanMultiline(body[f], 1200);
+          if (f in body) next[f] = cleanMultiline(body[f], 2000);
         }
         for (const lf of [
           "heroCtaLink",
           "heroSecondaryCtaLink",
+          "googleMapsUrl",
           "socialInstagram",
           "socialFacebook",
           "socialYoutube",
@@ -1095,7 +1130,7 @@ export default {
         ]) {
           if (lf in body && isSafeHref(body[lf])) next[lf] = String(body[lf] || "").trim();
         }
-        for (const imgf of ["heroDesktopImage", "heroMobileImage"]) {
+        for (const imgf of ["logoUrl", "heroDesktopImage", "heroMobileImage"]) {
           if (imgf in body && isSafeImageSrc(body[imgf])) {
             next[imgf] = String(body[imgf] || "").trim();
           }
@@ -1106,12 +1141,22 @@ export default {
         }
         if (Array.isArray(body.faqs)) {
           next.faqs = body.faqs
-            .slice(0, 20)
+            .slice(0, 30)
             .map((f) => ({
               question: cleanText(f?.question, 300),
               answer: cleanMultiline(f?.answer, 1500),
             }))
             .filter((f) => f.question && f.answer);
+        }
+        if (Array.isArray(body.caseGalleryImages)) {
+          next.caseGalleryImages = body.caseGalleryImages
+            .slice(0, 18)
+            .map((item, idx) => ({
+              id: cleanText(item?.id, 80) || `case-${idx + 1}`,
+              imageUrl: String(item?.imageUrl ?? "").trim(),
+              caption: cleanText(item?.caption, 180) || `Smile transformation ${idx + 1}`,
+            }))
+            .filter((item) => item.imageUrl && isSafeImageSrc(item.imageUrl));
         }
         state.siteContent = next;
         await saveState(env, state);
@@ -1266,24 +1311,49 @@ export default {
       // Testimonials CRUD
       if (pathname === "/api/admin/testimonials" && method === "POST") {
         const body = await readJsonBody(request);
-        const author = cleanText(body.author, 120);
-        const quote = cleanMultiline(body.quote, 1200);
-        if (!author || !quote) {
-          return jsonResponse({ error: "Patient name and testimonial quote are required." }, 400);
+        const reviewerName = cleanText(body.reviewerName || body.author, 120);
+        const quote = cleanMultiline(body.quote || "", 1500);
+        const imageUrl = String(body.imageUrl || "").trim();
+        if (imageUrl && !isSafeImageSrc(imageUrl)) {
+          return jsonResponse({ error: "Invalid review image URL." }, 400);
         }
+        if (!reviewerName) {
+          return jsonResponse({ error: "Reviewer name or title is required." }, 400);
+        }
+        if (quote.length < 5 && !imageUrl) {
+          return jsonResponse(
+            { error: "Please enter a quote (5+ chars) or upload a review image." },
+            400
+          );
+        }
+        const consentConfirmed = Boolean(body.consentConfirmed ?? body.verifiedConsent ?? true);
         const testimonial = {
           id: crypto.randomUUID(),
-          author,
-          treatment: cleanText(body.treatment, 120),
+          reviewerName,
+          reviewerContext: cleanText(body.reviewerContext || body.treatment, 160),
           quote,
-          rating: Math.min(5, Math.max(1, Number(body.rating) || 5)),
-          verifiedConsent: Boolean(body.verifiedConsent),
-          published: Boolean(body.published && body.verifiedConsent),
+          rating: Math.min(5, Math.max(1, Math.round(Number(body.rating) || 5))),
+          source: cleanText(body.source || "Verified Patient", 80),
+          imageUrl,
+          consentConfirmed,
+          published: Boolean(body.published && consentConfirmed),
           sortOrder: Number(body.sortOrder) || state.testimonials.length + 1,
         };
         state.testimonials.push(testimonial);
+        state.testimonialsInitialized = true;
         await saveState(env, state);
         return jsonResponse({ ok: true, testimonial }, 201);
+      }
+
+      if (pathname === "/api/admin/testimonials/reorder" && method === "PUT") {
+        const body = await readJsonBody(request);
+        const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+        ids.forEach((id, idx) => {
+          const item = state.testimonials.find((t) => t.id === id);
+          if (item) item.sortOrder = idx + 1;
+        });
+        await saveState(env, state);
+        return jsonResponse({ ok: true, testimonials: state.testimonials });
       }
 
       if (pathname.startsWith("/api/admin/testimonials/")) {
@@ -1292,24 +1362,44 @@ export default {
           const body = await readJsonBody(request);
           const idx = state.testimonials.findIndex((t) => t.id === id);
           if (idx === -1) return jsonResponse({ error: "Testimonial not found" }, 404);
-          const verified =
-            "verifiedConsent" in body
-              ? Boolean(body.verifiedConsent)
-              : state.testimonials[idx].verifiedConsent;
+          if ("imageUrl" in body && !isSafeImageSrc(body.imageUrl)) {
+            return jsonResponse({ error: "Invalid review image URL." }, 400);
+          }
+          const cur = state.testimonials[idx];
+          const consent =
+            "consentConfirmed" in body
+              ? Boolean(body.consentConfirmed)
+              : "verifiedConsent" in body
+                ? Boolean(body.verifiedConsent)
+                : Boolean(cur.consentConfirmed);
           state.testimonials[idx] = {
-            ...state.testimonials[idx],
-            ...("author" in body ? { author: cleanText(body.author, 120) } : {}),
-            ...("treatment" in body ? { treatment: cleanText(body.treatment, 120) } : {}),
-            ...("quote" in body ? { quote: cleanMultiline(body.quote, 1200) } : {}),
-            ...("rating" in body ? { rating: Math.min(5, Math.max(1, Number(body.rating) || 5)) } : {}),
-            verifiedConsent: verified,
-            published: verified && ("published" in body ? Boolean(body.published) : state.testimonials[idx].published),
+            ...cur,
+            ...("reviewerName" in body
+              ? { reviewerName: cleanText(body.reviewerName, 120) }
+              : "author" in body
+                ? { reviewerName: cleanText(body.author, 120) }
+                : {}),
+            ...("reviewerContext" in body
+              ? { reviewerContext: cleanText(body.reviewerContext, 160) }
+              : "treatment" in body
+                ? { reviewerContext: cleanText(body.treatment, 160) }
+                : {}),
+            ...("quote" in body ? { quote: cleanMultiline(body.quote, 1500) } : {}),
+            ...("rating" in body
+              ? { rating: Math.min(5, Math.max(1, Math.round(Number(body.rating) || 5))) }
+              : {}),
+            ...("source" in body ? { source: cleanText(body.source, 80) } : {}),
+            ...("imageUrl" in body ? { imageUrl: String(body.imageUrl || "").trim() } : {}),
+            consentConfirmed: consent,
+            published:
+              consent && ("published" in body ? Boolean(body.published) : Boolean(cur.published)),
           };
           await saveState(env, state);
           return jsonResponse({ ok: true, testimonial: state.testimonials[idx] });
         }
         if (method === "DELETE") {
           state.testimonials = state.testimonials.filter((t) => t.id !== id);
+          state.testimonialsInitialized = true;
           await saveState(env, state);
           return jsonResponse({ ok: true });
         }

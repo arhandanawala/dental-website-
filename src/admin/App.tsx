@@ -1,14 +1,17 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  BookOpen,
   CalendarCheck,
   ExternalLink,
-  FileEdit,
   Inbox,
   LayoutDashboard,
   LogOut,
   Menu,
   MessageSquareQuote,
   Mic,
+  Palette,
+  PhoneCall,
   ShieldCheck,
   Sparkles,
   Stethoscope,
@@ -29,10 +32,19 @@ import {
   type VoiceCallRecord,
   type VoiceCallsStats,
 } from "./lib/api";
+import {
+  ADMIN_ROUTES,
+  getAdminPath,
+  getAdminRouteMeta,
+  resolveAdminRoute,
+  type AdminPageKey,
+} from "./lib/routes";
+import { AboutTab } from "./components/AboutTab";
 import { AdminsTab } from "./components/AdminsTab";
 import { AppointmentsTab } from "./components/AppointmentsTab";
 import { AuthGate, type AdminSessionUser } from "./components/AuthGate";
-import { ContentTab } from "./components/ContentTab";
+import { BrandingTab } from "./components/BrandingTab";
+import { ContactTab } from "./components/ContactTab";
 import { DoctorsTab } from "./components/DoctorsTab";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LeadsTab } from "./components/LeadsTab";
@@ -41,16 +53,19 @@ import { TestimonialsTab } from "./components/TestimonialsTab";
 import { TreatmentsTab } from "./components/TreatmentsTab";
 import { VoiceCallsTab } from "./components/VoiceCallsTab";
 
-type TabKey =
-  | "overview"
-  | "appointments"
-  | "leads"
-  | "voice"
-  | "doctors"
-  | "treatments"
-  | "content"
-  | "testimonials"
-  | "admins";
+const ROUTE_ICONS: Record<AdminPageKey, React.ComponentType<{ className?: string }>> = {
+  overview: LayoutDashboard,
+  appointments: CalendarCheck,
+  leads: Inbox,
+  voice: Mic,
+  branding: Palette,
+  about: BookOpen,
+  contact: PhoneCall,
+  doctors: Stethoscope,
+  treatments: Sparkles,
+  testimonials: MessageSquareQuote,
+  admins: ShieldCheck,
+};
 
 function AdminShell({
   user,
@@ -59,7 +74,10 @@ function AdminShell({
   user: AdminSessionUser;
   onSignOut: () => Promise<void>;
 }) {
-  const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const [activePage, setActivePage] = useState<AdminPageKey>(() =>
+    resolveAdminRoute(window.location.pathname)
+  );
+  const internalNavDepthRef = useRef(0);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [seeding, setSeeding] = useState(false);
@@ -84,6 +102,57 @@ function AdminShell({
     model: "gemini-3.8-live",
     voice: "Zephyr",
   });
+
+  // Normalize initial /admin URL and sync browser Back / Forward across Admin pages
+  useEffect(() => {
+    const initialPage = resolveAdminRoute(window.location.pathname);
+    const canonicalPath = getAdminPath(initialPage);
+    if (window.location.pathname !== canonicalPath) {
+      window.history.replaceState({ adminPage: initialPage, depth: 0 }, "", canonicalPath);
+    } else if (!window.history.state?.adminPage) {
+      window.history.replaceState({ adminPage: initialPage, depth: 0 }, "", canonicalPath);
+    }
+
+    const handlePopState = () => {
+      const nextPage = resolveAdminRoute(window.location.pathname);
+      setActivePage(nextPage);
+      setMobileMenuOpen(false);
+      const depth = typeof window.history.state?.depth === "number" ? window.history.state.depth : 0;
+      internalNavDepthRef.current = depth;
+      window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    const meta = getAdminRouteMeta(activePage);
+    document.title = `${meta.label} · Smile Masters Admin`;
+  }, [activePage]);
+
+  const navigateTo = useCallback((page: AdminPageKey) => {
+    const targetPath = getAdminPath(page);
+    setActivePage(page);
+    setMobileMenuOpen(false);
+    if (window.location.pathname !== targetPath) {
+      internalNavDepthRef.current += 1;
+      window.history.pushState(
+        { adminPage: page, depth: internalNavDepthRef.current },
+        "",
+        targetPath
+      );
+    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  const handleBack = useCallback(() => {
+    if (internalNavDepthRef.current > 0) {
+      window.history.back();
+      return;
+    }
+    navigateTo("overview");
+  }, [navigateTo]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -145,40 +214,44 @@ function AdminShell({
   const newLeadCount = leads.filter((l) => l.status === "New").length;
   const pendingApptCount = appointments.filter((a) => a.status === "Pending").length;
 
-  const navItems: {
-    key: TabKey;
-    label: string;
-    icon: React.ComponentType<{ className?: string }>;
-    badge?: number;
-  }[] = [
-    { key: "overview", label: "Overview", icon: LayoutDashboard },
-    { key: "appointments", label: "Appointments", icon: CalendarCheck, badge: pendingApptCount },
-    { key: "leads", label: "Enquiries & Leads", icon: Inbox, badge: newLeadCount },
-    { key: "voice", label: "Voice AI Calls", icon: Mic, badge: voiceStats.live || undefined },
-    { key: "doctors", label: "Doctors", icon: Stethoscope },
-    { key: "treatments", label: "Treatments", icon: Sparkles },
-    { key: "content", label: "Site Content & FAQs", icon: FileEdit },
-    { key: "testimonials", label: "Testimonials", icon: MessageSquareQuote },
-    { key: "admins", label: "Admin Credentials", icon: ShieldCheck },
-  ];
+  const badgeFor = (key: AdminPageKey): number | undefined => {
+    if (key === "appointments") return pendingApptCount || undefined;
+    if (key === "leads") return newLeadCount || undefined;
+    if (key === "voice") return voiceStats.live || undefined;
+    return undefined;
+  };
 
-  function selectTab(key: TabKey) {
-    setActiveTab(key);
-    setMobileMenuOpen(false);
-  }
+  const routeMeta = getAdminRouteMeta(activePage);
+  const groups: { id: "desk" | "website" | "system"; title: string }[] = [
+    { id: "desk", title: "Clinic Desk" },
+    { id: "website", title: "Website Editor" },
+    { id: "system", title: "Security" },
+  ];
 
   return (
     <div className="min-h-screen bg-canvas text-ink flex flex-col lg:flex-row">
       {/* Mobile top bar */}
-      <header className="lg:hidden sticky top-0 z-30 bg-panel border-b border-line px-4 py-3 flex items-center justify-between">
-        <div>
-          <div className="text-sm font-semibold text-ink">Smile Masters CMS</div>
-          <div className="text-[11px] text-muted">@{user.username}</div>
+      <header className="lg:hidden sticky top-0 z-30 bg-panel border-b border-line px-4 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          {activePage !== "overview" && (
+            <button
+              type="button"
+              onClick={handleBack}
+              className="p-2 rounded-xl border border-line text-ink hover:border-accent cursor-pointer shrink-0"
+              aria-label="Go back to previous admin page"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+          )}
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-ink truncate">{routeMeta.label}</div>
+            <div className="text-[11px] text-muted truncate">Smile Masters CMS · @{user.username}</div>
+          </div>
         </div>
         <button
           type="button"
           onClick={() => setMobileMenuOpen((v) => !v)}
-          className="p-2 rounded-xl border border-line text-ink cursor-pointer"
+          className="p-2 rounded-xl border border-line text-ink cursor-pointer shrink-0"
           aria-label="Toggle admin menu"
         >
           {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -191,7 +264,7 @@ function AdminShell({
           mobileMenuOpen ? "block" : "hidden"
         } lg:flex lg:flex-col lg:w-64 lg:shrink-0 bg-panel border-b lg:border-b-0 lg:border-r border-line p-4 justify-between`}
       >
-        <div className="space-y-6">
+        <div className="space-y-5">
           <div className="px-2 pt-1">
             <div className="text-sm font-semibold text-ink tracking-tight">Smile Masters</div>
             <div className="text-[11px] text-accent font-medium">
@@ -199,53 +272,66 @@ function AdminShell({
             </div>
           </div>
 
-          <nav className="space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = activeTab === item.key;
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() => selectTab(item.key)}
-                  className={`w-full flex items-center justify-between gap-2.5 px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
-                    active
-                      ? "bg-accent text-primary-foreground font-semibold"
-                      : "text-muted hover:text-ink hover:bg-secondary/70"
-                  }`}
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Icon className="w-4 h-4" />
-                    <span>{item.label}</span>
-                  </span>
-                  {item.badge ? (
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+          <nav className="space-y-4" aria-label="Admin sections">
+            {groups.map((grp) => (
+              <div key={grp.id} className="space-y-1">
+                <div className="px-3 text-[10px] font-semibold uppercase tracking-wider text-muted/80">
+                  {grp.title}
+                </div>
+                {ADMIN_ROUTES.filter((r) => r.group === grp.id).map((item) => {
+                  const Icon = ROUTE_ICONS[item.key];
+                  const active = activePage === item.key;
+                  const badge = badgeFor(item.key);
+                  return (
+                    <a
+                      key={item.key}
+                      href={getAdminPath(item.key)}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateTo(item.key);
+                      }}
+                      className={`w-full flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer ${
                         active
-                          ? "bg-primary-foreground/20 text-primary-foreground"
-                          : "bg-accent/20 text-accent"
+                          ? "bg-accent text-primary-foreground font-semibold"
+                          : "text-muted hover:text-ink hover:bg-secondary/70"
                       }`}
                     >
-                      {item.badge}
-                    </span>
-                  ) : null}
-                </button>
-              );
-            })}
+                      <span className="flex items-center gap-2.5">
+                        <Icon className="w-4 h-4 shrink-0" />
+                        <span>{item.label}</span>
+                      </span>
+                      {badge ? (
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            active
+                              ? "bg-primary-foreground/20 text-primary-foreground"
+                              : "bg-accent/20 text-accent"
+                          }`}
+                        >
+                          {badge}
+                        </span>
+                      ) : null}
+                    </a>
+                  );
+                })}
+              </div>
+            ))}
           </nav>
         </div>
 
-        <div className="pt-6 mt-6 border-t border-line space-y-2">
+        <div className="pt-5 mt-5 border-t border-line space-y-2">
           <div className="px-2">
             <div className="text-xs font-medium text-ink truncate">Clinic Administrator</div>
             <div className="text-[11px] text-muted truncate">@{user.username}</div>
           </div>
           <a
             href="/"
+            target="_blank"
+            rel="noopener noreferrer"
             className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-muted hover:text-ink hover:bg-secondary/70"
           >
             <ExternalLink className="w-3.5 h-3.5" />
-            <span>Public Website</span>
+            <span>Open Public Website</span>
           </a>
           <button
             type="button"
@@ -260,6 +346,45 @@ function AdminShell({
 
       {/* Main Content */}
       <main className="flex-1 min-w-0 p-5 sm:p-8 max-w-6xl w-full mx-auto">
+        {/* Multi-page Admin breadcrumb & Back bar on sub-pages */}
+        {activePage !== "overview" && (
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-line/70">
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={handleBack}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-panel border border-line text-xs font-semibold text-ink hover:border-accent transition cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back</span>
+              </button>
+              <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-xs text-muted">
+                <a
+                  href="/admin/"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    navigateTo("overview");
+                  }}
+                  className="hover:text-ink transition"
+                >
+                  Admin
+                </a>
+                <span>/</span>
+                <span className="text-ink font-medium">{routeMeta.label}</span>
+              </nav>
+            </div>
+            <a
+              href="/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-line text-xs text-muted hover:text-ink hover:border-accent transition"
+            >
+              <span>View Live Site</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
+        )}
+
         {toast && (
           <div
             role="status"
@@ -280,7 +405,7 @@ function AdminShell({
           <div className="py-16 text-center text-sm text-muted">Loading clinic workspace…</div>
         ) : (
           <>
-            {activeTab === "overview" && (
+            {activePage === "overview" && (
               <OverviewTab
                 siteContent={siteContent}
                 leads={leads}
@@ -290,20 +415,20 @@ function AdminShell({
                 testimonials={testimonials}
                 seeding={seeding}
                 onSeedDefaults={handleSeedDefaults}
-                onNavigate={(tab) => selectTab(tab as TabKey)}
+                onNavigate={(tab) => navigateTo(tab as AdminPageKey)}
               />
             )}
-            {activeTab === "appointments" && (
+            {activePage === "appointments" && (
               <AppointmentsTab
                 appointments={appointments}
                 onRefresh={refreshSnapshot}
                 onToast={showToast}
               />
             )}
-            {activeTab === "leads" && (
+            {activePage === "leads" && (
               <LeadsTab leads={leads} onRefresh={refreshSnapshot} onToast={showToast} />
             )}
-            {activeTab === "voice" && (
+            {activePage === "voice" && (
               <VoiceCallsTab
                 calls={voiceCalls}
                 stats={voiceStats}
@@ -312,31 +437,46 @@ function AdminShell({
                 onToast={showToast}
               />
             )}
-            {activeTab === "doctors" && (
+            {activePage === "branding" && (
+              <BrandingTab
+                siteContent={siteContent}
+                onRefresh={refreshSnapshot}
+                onToast={showToast}
+              />
+            )}
+            {activePage === "about" && (
+              <AboutTab
+                siteContent={siteContent}
+                onRefresh={refreshSnapshot}
+                onToast={showToast}
+              />
+            )}
+            {activePage === "contact" && (
+              <ContactTab
+                siteContent={siteContent}
+                onRefresh={refreshSnapshot}
+                onToast={showToast}
+              />
+            )}
+            {activePage === "doctors" && (
               <DoctorsTab doctors={doctors} onRefresh={refreshSnapshot} onToast={showToast} />
             )}
-            {activeTab === "treatments" && (
+            {activePage === "treatments" && (
               <TreatmentsTab
                 treatments={treatments}
                 onRefresh={refreshSnapshot}
                 onToast={showToast}
               />
             )}
-            {activeTab === "content" && (
-              <ContentTab
+            {activePage === "testimonials" && (
+              <TestimonialsTab
+                testimonials={testimonials}
                 siteContent={siteContent}
                 onRefresh={refreshSnapshot}
                 onToast={showToast}
               />
             )}
-            {activeTab === "testimonials" && (
-              <TestimonialsTab
-                testimonials={testimonials}
-                onRefresh={refreshSnapshot}
-                onToast={showToast}
-              />
-            )}
-            {activeTab === "admins" && (
+            {activePage === "admins" && (
               <AdminsTab currentUsername={user.username} onToast={showToast} />
             )}
           </>

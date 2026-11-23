@@ -1,17 +1,81 @@
-import type { Doctor, SiteContent, Treatment } from "./types";
+import type { Doctor, SiteContent, Testimonial, Treatment } from "./types";
 
 export const PRIMARY_ADMIN_EMAIL = "arhandanawala@gmail.com";
+
+export const DEFAULT_CASE_GALLERY = [
+  {
+    id: "case-1",
+    imageUrl: "assets/img/smilemasters/case-review-1.jpg",
+    caption: "Smile Masters patient smile transformation story 1",
+  },
+  {
+    id: "case-2",
+    imageUrl: "assets/img/smilemasters/case-review-2.jpg",
+    caption: "Smile Masters patient smile transformation story 2",
+  },
+  {
+    id: "case-3",
+    imageUrl: "assets/img/smilemasters/case-review-3.jpg",
+    caption: "Smile Masters patient smile transformation story 3",
+  },
+  {
+    id: "case-4",
+    imageUrl: "assets/img/smilemasters/case-review-4.jpg",
+    caption: "Smile Masters patient smile transformation story 4",
+  },
+  {
+    id: "case-5",
+    imageUrl: "assets/img/smilemasters/case-review-5.jpg",
+    caption: "Smile Masters patient smile transformation story 5",
+  },
+  {
+    id: "case-6",
+    imageUrl: "assets/img/smilemasters/case-review-6.jpg",
+    caption: "Smile Masters patient smile transformation story 6",
+  },
+];
+
+export const DEFAULT_TESTIMONIALS: Omit<Testimonial, "createdAt" | "updatedAt">[] = [
+  {
+    id: "google-review-bandra-1",
+    reviewerName: "Verified Google Review · Bandra West",
+    reviewerContext: "Smile Masters & Jaw Joint Matters",
+    quote: "",
+    rating: 5,
+    source: "Google Review",
+    imageUrl: "assets/img/smilemasters/patient-review-1.png",
+    consentConfirmed: true,
+    published: true,
+    sortOrder: 1,
+  },
+  {
+    id: "google-review-tmj-2",
+    reviewerName: "Verified Google Review · TMJ & Dental Care",
+    reviewerContext: "Smile Masters Mumbai",
+    quote: "",
+    rating: 5,
+    source: "Google Review",
+    imageUrl: "assets/img/smilemasters/patient-review-2.png",
+    consentConfirmed: true,
+    published: true,
+    sortOrder: 2,
+  },
+];
 
 export const DEFAULT_SITE_CONTENT: SiteContent = {
   clinicName: "Smile Masters & Jaw Joint Matters",
   tagline: "TMJ Care, Orthodontics & Comprehensive Dentistry in Bandra West, Mumbai",
   foundedYear: "2006",
+  logoUrl: "",
+  logoAlt: "Smile Masters & Jaw Joint Matters",
   phone: "+91 77389 68210",
+  whatsappNumber: "+91 77389 68210",
   email: "info@smilemastersindia.com",
   address:
     "Zeba Apartments, 3rd Floor, Hill Road (Above Mamamia Pizza, next to Tea Villa Cafe), Santosh Nagar, Bandra West, Mumbai, Maharashtra 400050",
   city: "Bandra West, Mumbai",
   openingHours: "Monday – Saturday · By Appointment (In-Clinic & Online TMJ Consultations)",
+  googleMapsUrl: "https://maps.app.goo.gl/J5YAuRDmQN1JFxho7",
   heroEyebrow: "Bandra West, Mumbai · Est. 2006",
   heroHeadline: "Smile Masters & Jaw Joint Matters",
   heroMobileHeadline: "Specialist TMJ & Dental Care in Bandra West",
@@ -33,6 +97,10 @@ export const DEFAULT_SITE_CONTENT: SiteContent = {
   treatmentsSectionTitle: "Our Clinical Treatments",
   treatmentsSectionSubtitle:
     "Whether you are seeking relief from jaw joint pain, a natural smile makeover, orthodontic bite correction, or full-mouth rehabilitation, every treatment begins with thorough computer-aided diagnosis.",
+  testimonialsSectionEyebrow: "Real Stories, Real Smiles",
+  testimonialsSectionTitle: "What Our Patients Say & Experience",
+  testimonialsSectionNote:
+    "Real patient feedback published directly from Smile Masters & Google Reviews.",
   bookingNotice:
     "Submitting a request does not automatically confirm a slot — our Bandra West clinic desk will contact you promptly to confirm your appointment.",
   footerDescription:
@@ -66,6 +134,7 @@ export const DEFAULT_SITE_CONTENT: SiteContent = {
         "Yes. Dr. Laila Khakiani (M.D.S. Orthodontist & Smile Designing Expert) treats children, teens, and adults using metal and ceramic braces, clear aligners, and myofunctional appliances to guide healthy jaw growth and bite correction.",
     },
   ],
+  caseGalleryImages: DEFAULT_CASE_GALLERY,
 };
 
 export const DEFAULT_DOCTORS: Omit<Doctor, "createdAt" | "updatedAt">[] = [

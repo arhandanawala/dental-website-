@@ -188,6 +188,13 @@ app.post("/api/admin/testimonials", auth.requireAdmin, (req, res) => {
   }
 });
 
+app.put("/api/admin/testimonials/reorder", auth.requireAdmin, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+  if (!ids.length) return res.status(400).json({ error: "Ordered IDs required" });
+  const testimonials = cms.reorderTestimonials(ids);
+  res.json({ ok: true, testimonials });
+});
+
 app.put("/api/admin/testimonials/:id", auth.requireAdmin, (req, res) => {
   try {
     const testimonial = cms.upsertTestimonial(req.body || {}, req.params.id);

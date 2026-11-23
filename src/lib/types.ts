@@ -6,15 +6,25 @@ export interface FaqItem {
   answer: string;
 }
 
+export interface CaseGalleryItem {
+  id: string;
+  imageUrl: string;
+  caption: string;
+}
+
 export interface SiteContent {
   clinicName: string;
   tagline: string;
   foundedYear: string;
+  logoUrl: string;
+  logoAlt: string;
   phone: string;
+  whatsappNumber: string;
   email: string;
   address: string;
   city: string;
   openingHours: string;
+  googleMapsUrl: string;
   heroEyebrow: string;
   heroHeadline: string;
   heroMobileHeadline: string;
@@ -32,6 +42,9 @@ export interface SiteContent {
   doctorsSectionSubtitle: string;
   treatmentsSectionTitle: string;
   treatmentsSectionSubtitle: string;
+  testimonialsSectionEyebrow: string;
+  testimonialsSectionTitle: string;
+  testimonialsSectionNote: string;
   bookingNotice: string;
   footerDescription: string;
   socialInstagram: string;
@@ -42,6 +55,7 @@ export interface SiteContent {
   notifyOnNewLead: boolean;
   notifyOnNewAppointment: boolean;
   faqs: FaqItem[];
+  caseGalleryImages: CaseGalleryItem[];
   updatedAt?: unknown;
 }
 
@@ -80,6 +94,9 @@ export interface Testimonial {
   reviewerName: string;
   reviewerContext: string;
   quote: string;
+  rating?: number;
+  source?: string;
+  imageUrl?: string;
   consentConfirmed: boolean;
   published: boolean;
   sortOrder: number;
