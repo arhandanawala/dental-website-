@@ -10,7 +10,7 @@ import * as db from "./db.js";
 import * as cms from "./cms-store.js";
 import * as cal from "./cal.js";
 import * as auth from "./auth.js";
-import { attachLiveSession, getVoiceStatus } from "./gemini-live.js";
+import { attachLiveSession, getVoiceStatus, probeVoiceHealth } from "./gemini-live.js";
 import { MAYA_SYSTEM_PROMPT as defaultPromptText } from "./prompt.js";
 import { subscribe } from "./livebus.js";
 
@@ -35,6 +35,10 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/api/voice/status", (_req, res) => {
   res.json(getVoiceStatus());
+});
+
+app.get("/api/voice/probe", async (_req, res) => {
+  res.json(await probeVoiceHealth());
 });
 
 // ---- Admin Auth ----

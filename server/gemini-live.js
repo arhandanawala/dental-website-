@@ -14,6 +14,7 @@ import {
   buildModelCandidates,
   isModelUnsupportedClose,
   formatGeminiCloseError,
+  discoverLiveModels,
 } from "./voice-utils.js";
 
 export { DEFAULT_LIVE_MODEL, DEFAULT_VOICE };
@@ -29,6 +30,26 @@ export function getVoiceStatus() {
     model: sanitizeEnvValue(process.env.GEMINI_LIVE_MODEL) || DEFAULT_LIVE_MODEL,
     fallbackModel: FALLBACK_LIVE_MODEL,
     voice: sanitizeEnvValue(process.env.GEMINI_VOICE) || DEFAULT_VOICE,
+  };
+}
+
+export async function probeVoiceHealth() {
+  const status = getVoiceStatus();
+  const apiKey = activeApiKey();
+  if (!apiKey) {
+    return {
+      ...status,
+      modelsApiStatus: 0,
+      availableLiveModels: [],
+      error: "GEMINI_API_KEY is not configured.",
+    };
+  }
+  const discovery = await discoverLiveModels(apiKey);
+  return {
+    ...status,
+    modelsApiStatus: discovery.status,
+    availableLiveModels: discovery.liveModels,
+    error: discovery.error,
   };
 }
 

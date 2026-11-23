@@ -14,7 +14,9 @@ import {
   buildModelCandidates,
   isModelUnsupportedClose,
   formatGeminiCloseError,
-  decodeWsData,
+  decodeWsDataAsync,
+  discoverLiveModels,
+  pickDiscoveredLiveModels,
 } from "../server/voice-utils.js";
 
 const COOKIE_NAME = "sm_admin";
@@ -468,16 +470,21 @@ export const LIVE_FUNCTION_DECLARATIONS = [
   },
 ];
 
-async function handleLiveWebSocket(request, env, ctx) {
+function handleLiveWebSocket(request, env, ctx) {
   const apiKey = sanitizeEnvValue(env?.GEMINI_API_KEY);
   const url = new URL(request.url);
   const timezone = url.searchParams.get("timezone") || "Asia/Kolkata";
-  const modelCandidates = buildModelCandidates(env?.GEMINI_LIVE_MODEL);
+  const initialCandidates = buildModelCandidates(env?.GEMINI_LIVE_MODEL);
   const voiceName = sanitizeEnvValue(env?.GEMINI_VOICE) || DEFAULT_VOICE;
 
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
-  server.accept();
+
+  let closed = false;
+  let setupDone = false;
+  let activeUpstream = null;
+  let state = null;
+  let call = null;
 
   const sendToClient = (payload) => {
     try {
@@ -487,46 +494,14 @@ async function handleLiveWebSocket(request, env, ctx) {
     }
   };
 
-  if (!apiKey) {
-    sendToClient({
-      type: "error",
-      message:
-        "Voice AI server key (GEMINI_API_KEY) is not configured yet in Cloudflare Worker Secrets. Add GEMINI_API_KEY in Cloudflare Workers → Settings → Variables and Secrets, redeploy, or call +91 77389 68210.",
-    });
-    server.close(1011, "missing_api_key");
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  const state = await loadState(env);
-  const call = {
-    id: crypto.randomUUID(),
-    startedAt: new Date().toISOString(),
-    endedAt: null,
-    status: "live",
-    outcome: "unknown",
-    patientName: null,
-    patientEmail: null,
-    patientPhone: null,
-    slotStart: null,
-    summary: null,
-    model: modelCandidates[0],
-    transcript: [],
-    recording: false,
-  };
-  state.calls.unshift(call);
-  if (state.calls.length > 50) state.calls.length = 50;
-  ctx.waitUntil(saveState(env, state));
-
-  let closed = false;
-  let setupDone = false;
-  let activeUpstream = null;
-
   const closeBoth = (reason, { suppressEnded = false } = {}) => {
     if (closed) return;
     closed = true;
-    call.status = "completed";
-    call.endedAt = new Date().toISOString();
-    ctx.waitUntil(saveState(env, state));
+    if (call && state) {
+      call.status = "completed";
+      call.endedAt = new Date().toISOString();
+      ctx.waitUntil(saveState(env, state));
+    }
     if (!suppressEnded) {
       sendToClient({ type: "ended", reason: reason || "done" });
     }
@@ -544,12 +519,15 @@ async function handleLiveWebSocket(request, env, ctx) {
 
   const failAndClose = (message, reason = "gemini_error") => {
     if (closed) return;
-    call.summary = call.summary || message;
+    if (call) {
+      call.summary = call.summary || message;
+    }
     sendToClient({ type: "error", message });
     closeBoth(reason, { suppressEnded: true });
   };
 
   const appendTranscript = (role, text, partial = false) => {
+    if (!call) return;
     const last = call.transcript[call.transcript.length - 1];
     const nowIso = new Date().toISOString();
     const fresh = last && Date.now() - new Date(last.at).getTime() < 4000;
@@ -643,225 +621,10 @@ async function handleLiveWebSocket(request, env, ctx) {
     return { ok: false, error: `Unknown tool: ${name}` };
   };
 
-  const upstreamUrl = `https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(
-    apiKey
-  )}`;
-
-  const connectUpstream = async (candidateIndex) => {
+  // CRITICAL (Cloudflare Workers): Attach ALL server listeners synchronously BEFORE server.accept()!
+  server.addEventListener("message", async (event) => {
     if (closed) return;
-    const activeModel = modelCandidates[candidateIndex];
-    call.model = activeModel;
-
-    let upstreamRes;
-    try {
-      upstreamRes = await fetch(upstreamUrl, {
-        headers: {
-          Upgrade: "websocket",
-          "User-Agent": "aistudio-build",
-        },
-      });
-    } catch (err) {
-      failAndClose(
-        `Could not reach Google Gemini Live service: ${err?.message || String(err)}`,
-        "upstream_failed"
-      );
-      return;
-    }
-
-    const upstream = upstreamRes.webSocket;
-    if (!upstream) {
-      const errBody = await upstreamRes.text().catch(() => "");
-      failAndClose(
-        formatGeminiCloseError(upstreamRes.status, errBody.slice(0, 180), activeModel),
-        "upstream_rejected"
-      );
-      return;
-    }
-
-    upstream.accept();
-    activeUpstream = upstream;
-    let handedOff = false;
-
-    // Send Gemini Live setup frame.
-    try {
-      upstream.send(
-        JSON.stringify({
-          setup: {
-            model: activeModel.startsWith("models/") ? activeModel : `models/${activeModel}`,
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName },
-                },
-              },
-            },
-            systemInstruction: {
-              parts: [{ text: buildMayaPrompt(state) }],
-            },
-            tools: [{ functionDeclarations: LIVE_FUNCTION_DECLARATIONS }],
-            inputAudioTranscription: {},
-            outputAudioTranscription: {},
-          },
-        })
-      );
-    } catch (err) {
-      failAndClose(
-        `Failed to initialize Gemini Live session: ${err?.message || String(err)}`,
-        "setup_send_failed"
-      );
-      return;
-    }
-
-    upstream.addEventListener("message", async (event) => {
-      if (closed || handedOff) return;
-      const rawText = decodeWsData(event.data, dec);
-      if (!rawText) return;
-
-      let msg;
-      try {
-        msg = JSON.parse(rawText);
-      } catch {
-        return;
-      }
-
-      if (msg.setupComplete) {
-        setupDone = true;
-        sendToClient({ type: "ready", callId: call.id, model: activeModel, voice: voiceName });
-        try {
-          upstream.send(
-            JSON.stringify({
-              clientContent: {
-                turns: [
-                  {
-                    role: "user",
-                    parts: [
-                      {
-                        text: `A visitor just connected to the Smile Masters & Jaw Joint Matters voice assistant (timezone: ${timezone}). Greet them warmly in 1–2 short spoken sentences as Maya and ask how you can help.`,
-                      },
-                    ],
-                  },
-                ],
-                turnComplete: true,
-              },
-            })
-          );
-        } catch {
-          /* ignore */
-        }
-        return;
-      }
-
-      const sc = msg.serverContent;
-      if (sc?.interrupted) {
-        sendToClient({ type: "interrupted" });
-      }
-
-      if (sc?.modelTurn?.parts) {
-        for (const part of sc.modelTurn.parts) {
-          if (part.inlineData?.data) {
-            sendToClient({
-              type: "audio",
-              mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000",
-              data: part.inlineData.data,
-            });
-          }
-          if (part.text && !part.thought) {
-            appendTranscript("maya", part.text, false);
-            sendToClient({ type: "transcript", role: "maya", text: part.text, finished: false });
-          }
-        }
-      }
-
-      if (sc?.inputTranscription?.text) {
-        appendTranscript("caller", sc.inputTranscription.text, !sc.inputTranscription.finished);
-        sendToClient({
-          type: "transcript",
-          role: "caller",
-          text: sc.inputTranscription.text,
-          finished: Boolean(sc.inputTranscription.finished),
-        });
-      }
-
-      if (sc?.outputTranscription?.text) {
-        appendTranscript("maya", sc.outputTranscription.text, !sc.outputTranscription.finished);
-        sendToClient({
-          type: "transcript",
-          role: "maya",
-          text: sc.outputTranscription.text,
-          finished: Boolean(sc.outputTranscription.finished),
-        });
-      }
-
-      if (sc?.turnComplete) {
-        sendToClient({ type: "turnComplete" });
-      }
-
-      if (msg.toolCall?.functionCalls?.length) {
-        const functionResponses = [];
-        let endRequested = false;
-        for (const fc of msg.toolCall.functionCalls) {
-          let result;
-          try {
-            result = await runTool(fc.name, fc.args || {});
-          } catch (err) {
-            result = { ok: false, error: err?.message || String(err) };
-          }
-          sendToClient({ type: "tool", name: fc.name, result });
-          if (fc.name === "end_call") endRequested = true;
-          functionResponses.push({
-            id: fc.id,
-            name: fc.name,
-            response: { result },
-          });
-        }
-        try {
-          upstream.send(JSON.stringify({ toolResponse: { functionResponses } }));
-        } catch {
-          /* ignore */
-        }
-        if (endRequested) {
-          setTimeout(() => closeBoth("maya_hangup"), 2500);
-        }
-      }
-    });
-
-    upstream.addEventListener("close", (ev) => {
-      if (closed || handedOff) return;
-      const code = ev?.code || 0;
-      const reason = ev?.reason || "";
-
-      // If the primary model is rejected by an external API key before setupComplete, retry with fallback.
-      if (
-        !setupDone &&
-        candidateIndex + 1 < modelCandidates.length &&
-        isModelUnsupportedClose(code, reason)
-      ) {
-        handedOff = true;
-        ctx.waitUntil(connectUpstream(candidateIndex + 1));
-        return;
-      }
-
-      if (!setupDone || (code && code !== 1000 && code !== 1001)) {
-        failAndClose(formatGeminiCloseError(code, reason, activeModel), "gemini_closed_error");
-        return;
-      }
-
-      closeBoth("gemini_closed");
-    });
-
-    upstream.addEventListener("error", () => {
-      if (closed || handedOff) return;
-      failAndClose(
-        "Voice connection to Google Gemini was interrupted. Please verify GEMINI_API_KEY and try again.",
-        "gemini_error"
-      );
-    });
-  };
-
-  server.addEventListener("message", (event) => {
-    if (closed) return;
-    const raw = decodeWsData(event.data, dec);
+    const raw = await decodeWsDataAsync(event.data, dec);
     if (!raw) return;
     let msg;
     try {
@@ -914,8 +677,336 @@ async function handleLiveWebSocket(request, env, ctx) {
 
   server.addEventListener("close", () => closeBoth("client_closed"));
   server.addEventListener("error", () => closeBoth("client_error"));
+  server.accept();
 
-  await connectUpstream(0);
+  const upstreamUrl = `https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(
+    apiKey
+  )}`;
+
+  const attemptModel = async (activeModel) => {
+    if (closed) return { ok: false, retryable: false, message: "Client disconnected." };
+    call.model = activeModel;
+
+    let upstreamRes;
+    try {
+      upstreamRes = await fetch(upstreamUrl, {
+        headers: {
+          Upgrade: "websocket",
+        },
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        retryable: false,
+        message: `Could not reach Google Gemini Live service: ${err?.message || String(err)}`,
+      };
+    }
+
+    const upstream = upstreamRes.webSocket;
+    if (!upstream) {
+      const errBody = await upstreamRes.text().catch(() => "");
+      return {
+        ok: false,
+        retryable: false,
+        message: formatGeminiCloseError(upstreamRes.status, errBody.slice(0, 220), activeModel),
+      };
+    }
+
+    return new Promise((resolveAttempt) => {
+      let settled = false;
+      let modelSetupDone = false;
+
+      const finishAttempt = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(setupTimer);
+        resolveAttempt(result);
+      };
+
+      const setupTimer = setTimeout(() => {
+        try {
+          upstream.close(1000, "setup_timeout");
+        } catch {
+          /* ignore */
+        }
+        finishAttempt({
+          ok: false,
+          retryable: true,
+          message: `Timed out waiting for Gemini Live (${activeModel}) to complete setup.`,
+        });
+      }, 10000);
+
+      // CRITICAL (Cloudflare Workers): Attach ALL upstream listeners BEFORE upstream.accept()!
+      upstream.addEventListener("message", async (event) => {
+        if (closed) return;
+        const rawText = await decodeWsDataAsync(event.data, dec);
+        if (!rawText) return;
+
+        let msg;
+        try {
+          msg = JSON.parse(rawText);
+        } catch {
+          return;
+        }
+
+        if (msg.setupComplete && !modelSetupDone) {
+          modelSetupDone = true;
+          setupDone = true;
+          activeUpstream = upstream;
+          finishAttempt({ ok: true, model: activeModel });
+          sendToClient({ type: "ready", callId: call.id, model: activeModel, voice: voiceName });
+          try {
+            upstream.send(
+              JSON.stringify({
+                clientContent: {
+                  turns: [
+                    {
+                      role: "user",
+                      parts: [
+                        {
+                          text: `A visitor just connected to the Smile Masters & Jaw Joint Matters voice assistant (timezone: ${timezone}). Greet them warmly in 1–2 short spoken sentences as Maya and ask how you can help.`,
+                        },
+                      ],
+                    },
+                  ],
+                  turnComplete: true,
+                },
+              })
+            );
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+
+        if (!modelSetupDone) return;
+
+        const sc = msg.serverContent;
+        if (sc?.interrupted) {
+          sendToClient({ type: "interrupted" });
+        }
+
+        if (sc?.modelTurn?.parts) {
+          for (const part of sc.modelTurn.parts) {
+            if (part.inlineData?.data) {
+              sendToClient({
+                type: "audio",
+                mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000",
+                data: part.inlineData.data,
+              });
+            }
+            if (part.text && !part.thought) {
+              appendTranscript("maya", part.text, false);
+              sendToClient({ type: "transcript", role: "maya", text: part.text, finished: false });
+            }
+          }
+        }
+
+        if (sc?.inputTranscription?.text) {
+          appendTranscript("caller", sc.inputTranscription.text, !sc.inputTranscription.finished);
+          sendToClient({
+            type: "transcript",
+            role: "caller",
+            text: sc.inputTranscription.text,
+            finished: Boolean(sc.inputTranscription.finished),
+          });
+        }
+
+        if (sc?.outputTranscription?.text) {
+          appendTranscript("maya", sc.outputTranscription.text, !sc.outputTranscription.finished);
+          sendToClient({
+            type: "transcript",
+            role: "maya",
+            text: sc.outputTranscription.text,
+            finished: Boolean(sc.outputTranscription.finished),
+          });
+        }
+
+        if (sc?.turnComplete) {
+          sendToClient({ type: "turnComplete" });
+        }
+
+        if (msg.toolCall?.functionCalls?.length) {
+          const functionResponses = [];
+          let endRequested = false;
+          for (const fc of msg.toolCall.functionCalls) {
+            let result;
+            try {
+              result = await runTool(fc.name, fc.args || {});
+            } catch (err) {
+              result = { ok: false, error: err?.message || String(err) };
+            }
+            sendToClient({ type: "tool", name: fc.name, result });
+            if (fc.name === "end_call") endRequested = true;
+            functionResponses.push({
+              id: fc.id,
+              name: fc.name,
+              response: { result },
+            });
+          }
+          try {
+            upstream.send(JSON.stringify({ toolResponse: { functionResponses } }));
+          } catch {
+            /* ignore */
+          }
+          if (endRequested) {
+            setTimeout(() => closeBoth("maya_hangup"), 2500);
+          }
+        }
+      });
+
+      upstream.addEventListener("close", (ev) => {
+        const code = ev?.code || 0;
+        const reason = ev?.reason || "";
+        if (!modelSetupDone) {
+          finishAttempt({
+            ok: false,
+            retryable: isModelUnsupportedClose(code, reason),
+            code,
+            reason,
+            message: formatGeminiCloseError(code, reason, activeModel),
+          });
+          return;
+        }
+        if (closed) return;
+        if (code && code !== 1000 && code !== 1001) {
+          failAndClose(formatGeminiCloseError(code, reason, activeModel), "gemini_closed_error");
+          return;
+        }
+        closeBoth("gemini_closed");
+      });
+
+      upstream.addEventListener("error", () => {
+        if (!modelSetupDone) {
+          finishAttempt({
+            ok: false,
+            retryable: false,
+            message: "Voice connection to Google Gemini was interrupted during setup. Verify GEMINI_API_KEY and try again.",
+          });
+          return;
+        }
+        if (closed) return;
+        failAndClose(
+          "Voice connection to Google Gemini was interrupted. Please verify GEMINI_API_KEY and try again.",
+          "gemini_error"
+        );
+      });
+
+      // Accept AFTER all listeners are registered, then send the setup frame!
+      upstream.accept();
+      try {
+        upstream.send(
+          JSON.stringify({
+            setup: {
+              model: activeModel.startsWith("models/") ? activeModel : `models/${activeModel}`,
+              generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName },
+                  },
+                },
+              },
+              systemInstruction: {
+                parts: [{ text: buildMayaPrompt(state) }],
+              },
+              tools: [{ functionDeclarations: LIVE_FUNCTION_DECLARATIONS }],
+              inputAudioTranscription: {},
+              outputAudioTranscription: {},
+            },
+          })
+        );
+      } catch (err) {
+        finishAttempt({
+          ok: false,
+          retryable: false,
+          message: `Failed to send Gemini Live setup frame: ${err?.message || String(err)}`,
+        });
+      }
+    });
+  };
+
+  const startUpstreamSession = async () => {
+    if (!apiKey) {
+      failAndClose(
+        "Voice AI server key (GEMINI_API_KEY) is not configured yet in Cloudflare Worker Secrets. Add GEMINI_API_KEY in Cloudflare Workers → Settings → Variables and Secrets, redeploy, or call +91 77389 68210.",
+        "missing_api_key"
+      );
+      return;
+    }
+
+    state = await loadState(env);
+    call = {
+      id: crypto.randomUUID(),
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      status: "live",
+      outcome: "unknown",
+      patientName: null,
+      patientEmail: null,
+      patientPhone: null,
+      slotStart: null,
+      summary: null,
+      model: initialCandidates[0],
+      transcript: [],
+      recording: false,
+    };
+    state.calls.unshift(call);
+    if (state.calls.length > 50) state.calls.length = 50;
+    ctx.waitUntil(saveState(env, state));
+
+    const tried = [];
+    let lastFailure = null;
+
+    for (const candidate of initialCandidates) {
+      if (closed) return;
+      tried.push(candidate);
+      const res = await attemptModel(candidate);
+      if (res.ok) return;
+      lastFailure = res;
+      if (!res.retryable) {
+        failAndClose(res.message, "gemini_setup_rejected");
+        return;
+      }
+    }
+
+    if (closed) return;
+
+    // Auto-discover the exact Live (bidiGenerateContent) model available on this API key.
+    const discovery = await discoverLiveModels(apiKey);
+    if (!discovery.ok) {
+      failAndClose(
+        formatGeminiCloseError(discovery.status, discovery.error, initialCandidates[0]),
+        "gemini_discovery_failed"
+      );
+      return;
+    }
+
+    const extraModels = pickDiscoveredLiveModels(
+      { models: discovery.liveModels.map((name) => ({ name: `models/${name}`, supportedGenerationMethods: ["bidiGenerateContent"] })) },
+      tried
+    ).slice(0, 2);
+
+    for (const discoveredModel of extraModels) {
+      if (closed) return;
+      tried.push(discoveredModel);
+      const res = await attemptModel(discoveredModel);
+      if (res.ok) return;
+      lastFailure = res;
+      if (!res.retryable) {
+        failAndClose(res.message, "gemini_setup_rejected");
+        return;
+      }
+    }
+
+    failAndClose(
+      lastFailure?.message ||
+        "No compatible Gemini Live voice model could be initialized with this API key.",
+      "gemini_no_live_model"
+    );
+  };
+
+  ctx.waitUntil(startUpstreamSession());
 
   return new Response(null, { status: 101, webSocket: client });
 }
@@ -937,6 +1028,26 @@ export default {
 
       if (pathname === "/api/voice/status" && method === "GET") {
         return jsonResponse(getVoiceStatus(env));
+      }
+
+      if (pathname === "/api/voice/probe" && method === "GET") {
+        const status = getVoiceStatus(env);
+        const apiKey = sanitizeEnvValue(env?.GEMINI_API_KEY);
+        if (!apiKey) {
+          return jsonResponse({
+            ...status,
+            modelsApiStatus: 0,
+            availableLiveModels: [],
+            error: "GEMINI_API_KEY is not set in Cloudflare Worker Secrets.",
+          });
+        }
+        const discovery = await discoverLiveModels(apiKey);
+        return jsonResponse({
+          ...status,
+          modelsApiStatus: discovery.status,
+          availableLiveModels: discovery.liveModels,
+          error: discovery.error,
+        });
       }
 
       if (pathname === "/api/cms/public" && method === "GET") {

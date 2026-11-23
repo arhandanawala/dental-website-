@@ -56,6 +56,91 @@ export function decodeWsData(data, decoder = new TextDecoder()) {
   return null;
 }
 
+export async function decodeWsDataAsync(data, decoder = new TextDecoder()) {
+  const sync = decodeWsData(data, decoder);
+  if (sync !== null) return sync;
+  if (data && typeof data.text === "function") {
+    try {
+      return await data.text();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function liveModelRank(name) {
+  const lower = name.toLowerCase();
+  if (lower.startsWith("gemini-3.") && lower.includes("live") && !lower.includes("extended-thinking")) {
+    return 100;
+  }
+  if (lower.includes("2.5-flash-native-audio")) return 90;
+  if (lower.includes("2.5") && lower.includes("live")) return 80;
+  if (lower.includes("native-audio")) return 70;
+  if (lower.includes("live")) return 60;
+  return 40;
+}
+
+export function pickDiscoveredLiveModels(modelsPayload, alreadyTried = []) {
+  const triedSet = new Set(
+    (alreadyTried || []).map((m) => String(m).replace(/^models\//, "").toLowerCase())
+  );
+  const models = Array.isArray(modelsPayload?.models) ? modelsPayload.models : [];
+  const candidates = [];
+  for (const m of models) {
+    const methods = Array.isArray(m?.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+    const supportsBidi = methods.some((x) => String(x).toLowerCase() === "bidigeneratecontent");
+    if (!supportsBidi) continue;
+    const shortName = String(m.name || "").replace(/^models\//, "").trim();
+    if (!shortName) continue;
+    const lower = shortName.toLowerCase();
+    if (lower.includes("transcribe") || lower.includes("translate") || lower.includes("extended-thinking")) {
+      continue;
+    }
+    if (triedSet.has(lower)) continue;
+    candidates.push(shortName);
+  }
+  candidates.sort((a, b) => {
+    const diff = liveModelRank(b) - liveModelRank(a);
+    if (diff !== 0) return diff;
+    return b.localeCompare(a);
+  });
+  return candidates;
+}
+
+export async function discoverLiveModels(apiKey, fetchImpl = fetch) {
+  const cleanKey = sanitizeEnvValue(apiKey);
+  if (!cleanKey) {
+    return { ok: false, status: 0, liveModels: [], error: "GEMINI_API_KEY is not configured." };
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(
+    cleanKey
+  )}`;
+  try {
+    const res = await fetchImpl(url, { method: "GET" });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg =
+        body?.error?.message ||
+        `Google Models API returned HTTP ${res.status}.`;
+      return { ok: false, status: res.status, liveModels: [], error: msg };
+    }
+    return {
+      ok: true,
+      status: res.status,
+      liveModels: pickDiscoveredLiveModels(body, []),
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      liveModels: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export function validateFunctionDeclarations(declarations) {
   const issues = [];
   for (const fn of declarations || []) {
