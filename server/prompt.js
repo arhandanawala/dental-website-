@@ -37,10 +37,6 @@ export const LIVE_FUNCTION_DECLARATIONS = [
     name: "get_clinic_details",
     description:
       "Retrieve up-to-date Smile Masters clinic address, phone, opening hours, published doctors, and treatments from the clinic CMS.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {},
-    },
   },
   {
     name: "request_appointment_callback",

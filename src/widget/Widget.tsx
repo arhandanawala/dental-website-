@@ -27,6 +27,9 @@ export function Widget() {
   const procRef = useRef<ScriptProcessorNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const mutedRef = useRef(false);
+  const readyRef = useRef(false);
+  const erroredRef = useRef(false);
+  const userEndedRef = useRef(false);
   const levelRef = useRef(0);
   const captionIdRef = useRef(1);
   const captionEndRef = useRef<HTMLDivElement | null>(null);
@@ -93,7 +96,9 @@ export function Widget() {
     });
   };
 
-  const stopAll = () => {
+  const stopAll = (byUser = false) => {
+    if (byUser) userEndedRef.current = true;
+    readyRef.current = false;
     try {
       wsRef.current?.send(JSON.stringify({ type: "end" }));
     } catch {
@@ -134,6 +139,9 @@ export function Widget() {
     setCaptions([]);
     setMuted(false);
     mutedRef.current = false;
+    readyRef.current = false;
+    erroredRef.current = false;
+    userEndedRef.current = false;
 
     // Unlock audio playback immediately inside the click gesture.
     let player: PcmPlayer | null = null;
@@ -220,7 +228,7 @@ export function Widget() {
         zeroGain.connect(rec.destination);
 
         proc.onaudioprocess = (ev) => {
-          if (ws.readyState !== WebSocket.OPEN || mutedRef.current) return;
+          if (ws.readyState !== WebSocket.OPEN || !readyRef.current || mutedRef.current) return;
           const input = ev.inputBuffer.getChannelData(0);
           let sum = 0;
           for (let i = 0; i < input.length; i++) {
@@ -248,6 +256,7 @@ export function Widget() {
         }
 
         if (msg.type === "ready") {
+          readyRef.current = true;
           setPhase("live");
           setStatus(
             withMic
@@ -286,30 +295,48 @@ export function Widget() {
             );
           }
         } else if (msg.type === "error") {
+          erroredRef.current = true;
           const errText =
             typeof msg.message === "string" && msg.message
               ? msg.message
               : "Voice assistant encountered a connection error.";
           setError(errText);
           setPhase("error");
-          stopAll();
+          stopAll(false);
         } else if (msg.type === "ended") {
-          stopAll();
+          if (erroredRef.current) return;
+          stopAll(false);
           setPhase("bubble");
         }
       };
 
       ws.onerror = () => {
+        if (erroredRef.current || userEndedRef.current) return;
+        erroredRef.current = true;
         setError(
           "Could not reach the Voice AI service right now. Please try again, use the appointment form, or call +91 77389 68210."
         );
         setPhase("error");
-        stopAll();
+        stopAll(false);
+      };
+
+      ws.onclose = (ev) => {
+        if (erroredRef.current || userEndedRef.current) return;
+        if (!readyRef.current) {
+          erroredRef.current = true;
+          const detail = ev.reason ? ` (${ev.reason})` : ev.code ? ` (code ${ev.code})` : "";
+          setError(
+            `Voice AI connection closed before Maya could start${detail}. Check GEMINI_API_KEY in Cloudflare Worker Secrets and redeploy.`
+          );
+          setPhase("error");
+          stopAll(false);
+        }
       };
     } catch (err) {
+      erroredRef.current = true;
       setError(err instanceof Error ? err.message : "Could not start voice session.");
       setPhase("error");
-      stopAll();
+      stopAll(false);
     }
   };
 
@@ -324,7 +351,7 @@ export function Widget() {
   };
 
   const hangUp = () => {
-    stopAll();
+    stopAll(true);
     setPhase("bubble");
     setStatus("Voice assistant is ready…");
   };

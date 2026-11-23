@@ -6,19 +6,29 @@ import { publish } from "./livebus.js";
 import * as db from "./db.js";
 import * as cms from "./cms-store.js";
 
-export const DEFAULT_LIVE_MODEL = "gemini-3.8-live";
-export const DEFAULT_VOICE = "Zephyr";
+import {
+  DEFAULT_LIVE_MODEL,
+  FALLBACK_LIVE_MODEL,
+  DEFAULT_VOICE,
+  sanitizeEnvValue,
+  buildModelCandidates,
+  isModelUnsupportedClose,
+  formatGeminiCloseError,
+} from "./voice-utils.js";
+
+export { DEFAULT_LIVE_MODEL, DEFAULT_VOICE };
 
 function activeApiKey() {
-  return process.env.GEMINI_API_KEY || "";
+  return sanitizeEnvValue(process.env.GEMINI_API_KEY);
 }
 
 export function getVoiceStatus() {
   const configured = Boolean(activeApiKey());
   return {
     configured,
-    model: process.env.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL,
-    voice: process.env.GEMINI_VOICE || DEFAULT_VOICE,
+    model: sanitizeEnvValue(process.env.GEMINI_LIVE_MODEL) || DEFAULT_LIVE_MODEL,
+    fallbackModel: FALLBACK_LIVE_MODEL,
+    voice: sanitizeEnvValue(process.env.GEMINI_VOICE) || DEFAULT_VOICE,
   };
 }
 
@@ -216,8 +226,9 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
     );
   }
 
-  const model = process.env.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL;
-  const voiceName = process.env.GEMINI_VOICE || DEFAULT_VOICE;
+  const modelCandidates = buildModelCandidates(process.env.GEMINI_LIVE_MODEL);
+  let activeModel = modelCandidates[0];
+  const voiceName = sanitizeEnvValue(process.env.GEMINI_VOICE) || DEFAULT_VOICE;
 
   const ai = new GoogleGenAI({
     apiKey,
@@ -229,16 +240,17 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
     },
   });
 
-  const call = db.createCall({ model });
+  const call = db.createCall({ model: activeModel });
   const recorder = createRecorder();
 
   let session = null;
   let closed = false;
+  let readySent = false;
   let timeLimitTimer = null;
   let hardStopTimer = null;
   let mayaHangupTimer = null;
 
-  const closeBoth = (reason) => {
+  const closeBoth = (reason, { suppressEnded = false } = {}) => {
     if (closed) return;
     closed = true;
     if (timeLimitTimer) clearTimeout(timeLimitTimer);
@@ -260,7 +272,9 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
       }
     }
 
-    sendJson(clientWs, { type: "ended", reason: reason || "done" });
+    if (!suppressEnded) {
+      sendJson(clientWs, { type: "ended", reason: reason || "done" });
+    }
     try {
       session?.close();
     } catch {
@@ -273,9 +287,17 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
     }
   };
 
-  try {
-    session = await ai.live.connect({
-      model,
+  const failAndClose = (message, reason = "gemini_error") => {
+    if (closed) return;
+    db.patchCall(call.id, { summary: message });
+    sendJson(clientWs, { type: "error", message });
+    closeBoth(reason, { suppressEnded: true });
+  };
+
+  const connectWithModel = async (modelName) => {
+    activeModel = modelName;
+    return ai.live.connect({
+      model: modelName,
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
@@ -389,24 +411,50 @@ export async function attachLiveSession(clientWs, { timezone } = {}) {
         onerror: (err) => {
           const message = err?.message || "Voice connection interrupted.";
           console.error("[maya] Gemini Live error:", message);
-          sendJson(clientWs, { type: "error", message });
-          closeBoth("gemini_error");
+          failAndClose(message, "gemini_error");
         },
-        onclose: () => {
+        onclose: (ev) => {
+          if (closed) return;
+          const code = ev?.code || 0;
+          const reason = ev?.reason || "";
+          if (!readySent || (code && code !== 1000 && code !== 1001)) {
+            failAndClose(formatGeminiCloseError(code, reason, activeModel), "gemini_closed_error");
+            return;
+          }
           closeBoth("gemini_closed");
         },
       },
     });
-  } catch (err) {
+  };
+
+  let lastConnectError = null;
+  for (let i = 0; i < modelCandidates.length; i++) {
+    try {
+      session = await connectWithModel(modelCandidates[i]);
+      lastConnectError = null;
+      break;
+    } catch (err) {
+      lastConnectError = err;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (i + 1 < modelCandidates.length && isModelUnsupportedClose(0, errMsg)) {
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (!session) {
+    const errMsg = lastConnectError instanceof Error ? lastConnectError.message : String(lastConnectError || "Connection failed");
     db.patchCall(call.id, {
       status: "completed",
       endedAt: new Date().toISOString(),
-      summary: `Connection failed: ${err instanceof Error ? err.message : String(err)}`,
+      summary: `Connection failed: ${errMsg}`,
     });
-    throw err;
+    throw new Error(formatGeminiCloseError(0, errMsg, activeModel));
   }
 
-  sendJson(clientWs, { type: "ready", callId: call.id, model, voice: voiceName });
+  readySent = true;
+  sendJson(clientWs, { type: "ready", callId: call.id, model: activeModel, voice: voiceName });
 
   // Kick off Maya's warm greeting right away.
   try {

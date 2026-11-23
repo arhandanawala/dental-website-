@@ -6,11 +6,19 @@ import {
   DEFAULT_TREATMENTS,
   MAYA_SYSTEM_PROMPT_TEXT,
 } from "../server/cms-defaults.js";
+import {
+  DEFAULT_LIVE_MODEL,
+  FALLBACK_LIVE_MODEL,
+  DEFAULT_VOICE,
+  sanitizeEnvValue,
+  buildModelCandidates,
+  isModelUnsupportedClose,
+  formatGeminiCloseError,
+  decodeWsData,
+} from "../server/voice-utils.js";
 
 const COOKIE_NAME = "sm_admin";
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const DEFAULT_LIVE_MODEL = "gemini-3.8-live";
-const DEFAULT_VOICE = "Zephyr";
 
 // Pre-seeded PBKDF2-SHA256 (100,000 iterations) default clinic admin credential hash.
 // Override in Cloudflare Workers Secrets with ADMIN_USER and ADMIN_PASSWORD.
@@ -344,10 +352,14 @@ function getCallStats(calls) {
 }
 
 function getVoiceStatus(env) {
+  const apiKey = sanitizeEnvValue(env?.GEMINI_API_KEY);
+  const model = sanitizeEnvValue(env?.GEMINI_LIVE_MODEL) || DEFAULT_LIVE_MODEL;
+  const voice = sanitizeEnvValue(env?.GEMINI_VOICE) || DEFAULT_VOICE;
   return {
-    configured: Boolean(env?.GEMINI_API_KEY),
-    model: env?.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL,
-    voice: env?.GEMINI_VOICE || DEFAULT_VOICE,
+    configured: Boolean(apiKey),
+    model,
+    fallbackModel: FALLBACK_LIVE_MODEL,
+    voice,
   };
 }
 
@@ -400,12 +412,11 @@ function buildMayaPrompt(state) {
   return `${base}\n\n${liveFacts}`;
 }
 
-const LIVE_FUNCTION_DECLARATIONS = [
+export const LIVE_FUNCTION_DECLARATIONS = [
   {
     name: "get_clinic_details",
     description:
       "Retrieve up-to-date Smile Masters clinic address, phone, opening hours, published doctors, and treatments from the clinic CMS.",
-    parameters: { type: "OBJECT", properties: {} },
   },
   {
     name: "request_appointment_callback",
@@ -458,11 +469,11 @@ const LIVE_FUNCTION_DECLARATIONS = [
 ];
 
 async function handleLiveWebSocket(request, env, ctx) {
-  const apiKey = env?.GEMINI_API_KEY || "";
+  const apiKey = sanitizeEnvValue(env?.GEMINI_API_KEY);
   const url = new URL(request.url);
   const timezone = url.searchParams.get("timezone") || "Asia/Kolkata";
-  const model = env?.GEMINI_LIVE_MODEL || DEFAULT_LIVE_MODEL;
-  const voiceName = env?.GEMINI_VOICE || DEFAULT_VOICE;
+  const modelCandidates = buildModelCandidates(env?.GEMINI_LIVE_MODEL);
+  const voiceName = sanitizeEnvValue(env?.GEMINI_VOICE) || DEFAULT_VOICE;
 
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
@@ -480,7 +491,7 @@ async function handleLiveWebSocket(request, env, ctx) {
     sendToClient({
       type: "error",
       message:
-        "Voice AI server key (GEMINI_API_KEY) is not configured yet in Cloudflare Worker Secrets. Please call +91 77389 68210 or use the appointment form.",
+        "Voice AI server key (GEMINI_API_KEY) is not configured yet in Cloudflare Worker Secrets. Add GEMINI_API_KEY in Cloudflare Workers → Settings → Variables and Secrets, redeploy, or call +91 77389 68210.",
     });
     server.close(1011, "missing_api_key");
     return new Response(null, { status: 101, webSocket: client });
@@ -498,7 +509,7 @@ async function handleLiveWebSocket(request, env, ctx) {
     patientPhone: null,
     slotStart: null,
     summary: null,
-    model,
+    model: modelCandidates[0],
     transcript: [],
     recording: false,
   };
@@ -506,55 +517,21 @@ async function handleLiveWebSocket(request, env, ctx) {
   if (state.calls.length > 50) state.calls.length = 50;
   ctx.waitUntil(saveState(env, state));
 
-  const upstreamUrl = `https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(
-    apiKey
-  )}`;
-
-  let upstreamRes;
-  try {
-    upstreamRes = await fetch(upstreamUrl, {
-      headers: {
-        Upgrade: "websocket",
-        "User-Agent": "aistudio-build",
-      },
-    });
-  } catch (err) {
-    call.status = "completed";
-    call.endedAt = new Date().toISOString();
-    call.summary = `Connection failed: ${err?.message || String(err)}`;
-    ctx.waitUntil(saveState(env, state));
-    sendToClient({ type: "error", message: "Could not reach Gemini Live voice service." });
-    server.close(1011, "upstream_failed");
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  const upstream = upstreamRes.webSocket;
-  if (!upstream) {
-    const errBody = await upstreamRes.text().catch(() => "");
-    call.status = "completed";
-    call.endedAt = new Date().toISOString();
-    call.summary = `Upstream HTTP ${upstreamRes.status}`;
-    ctx.waitUntil(saveState(env, state));
-    sendToClient({
-      type: "error",
-      message: `Voice AI upstream returned ${upstreamRes.status}. ${errBody.slice(0, 120)}`,
-    });
-    server.close(1011, "upstream_rejected");
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  upstream.accept();
-
   let closed = false;
-  const closeBoth = (reason) => {
+  let setupDone = false;
+  let activeUpstream = null;
+
+  const closeBoth = (reason, { suppressEnded = false } = {}) => {
     if (closed) return;
     closed = true;
     call.status = "completed";
     call.endedAt = new Date().toISOString();
     ctx.waitUntil(saveState(env, state));
-    sendToClient({ type: "ended", reason: reason || "done" });
+    if (!suppressEnded) {
+      sendToClient({ type: "ended", reason: reason || "done" });
+    }
     try {
-      upstream.close();
+      activeUpstream?.close();
     } catch {
       /* ignore */
     }
@@ -563,6 +540,13 @@ async function handleLiveWebSocket(request, env, ctx) {
     } catch {
       /* ignore */
     }
+  };
+
+  const failAndClose = (message, reason = "gemini_error") => {
+    if (closed) return;
+    call.summary = call.summary || message;
+    sendToClient({ type: "error", message });
+    closeBoth(reason, { suppressEnded: true });
   };
 
   const appendTranscript = (role, text, partial = false) => {
@@ -659,184 +643,279 @@ async function handleLiveWebSocket(request, env, ctx) {
     return { ok: false, error: `Unknown tool: ${name}` };
   };
 
-  // Send Gemini Live setup frame.
-  upstream.send(
-    JSON.stringify({
-      setup: {
-        model: model.startsWith("models/") ? model : `models/${model}`,
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName },
-            },
-          },
-        },
-        systemInstruction: {
-          parts: [{ text: buildMayaPrompt(state) }],
-        },
-        tools: [{ functionDeclarations: LIVE_FUNCTION_DECLARATIONS }],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-      },
-    })
-  );
+  const upstreamUrl = `https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(
+    apiKey
+  )}`;
 
-  upstream.addEventListener("message", async (event) => {
+  const connectUpstream = async (candidateIndex) => {
     if (closed) return;
-    let rawText;
-    if (typeof event.data === "string") {
-      rawText = event.data;
-    } else if (event.data instanceof ArrayBuffer) {
-      rawText = dec.decode(event.data);
-    } else {
-      return;
-    }
+    const activeModel = modelCandidates[candidateIndex];
+    call.model = activeModel;
 
-    let msg;
+    let upstreamRes;
     try {
-      msg = JSON.parse(rawText);
-    } catch {
-      return;
-    }
-
-    if (msg.setupComplete) {
-      sendToClient({ type: "ready", callId: call.id, model, voice: voiceName });
-      upstream.send(
-        JSON.stringify({
-          clientContent: {
-            turns: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    text: `A visitor just connected to the Smile Masters & Jaw Joint Matters voice assistant (timezone: ${timezone}). Greet them warmly in 1–2 short spoken sentences as Maya and ask how you can help.`,
-                  },
-                ],
-              },
-            ],
-            turnComplete: true,
-          },
-        })
+      upstreamRes = await fetch(upstreamUrl, {
+        headers: {
+          Upgrade: "websocket",
+          "User-Agent": "aistudio-build",
+        },
+      });
+    } catch (err) {
+      failAndClose(
+        `Could not reach Google Gemini Live service: ${err?.message || String(err)}`,
+        "upstream_failed"
       );
       return;
     }
 
-    const sc = msg.serverContent;
-    if (sc?.interrupted) {
-      sendToClient({ type: "interrupted" });
+    const upstream = upstreamRes.webSocket;
+    if (!upstream) {
+      const errBody = await upstreamRes.text().catch(() => "");
+      failAndClose(
+        formatGeminiCloseError(upstreamRes.status, errBody.slice(0, 180), activeModel),
+        "upstream_rejected"
+      );
+      return;
     }
 
-    if (sc?.modelTurn?.parts) {
-      for (const part of sc.modelTurn.parts) {
-        if (part.inlineData?.data) {
-          sendToClient({
-            type: "audio",
-            mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000",
-            data: part.inlineData.data,
-          });
+    upstream.accept();
+    activeUpstream = upstream;
+    let handedOff = false;
+
+    // Send Gemini Live setup frame.
+    try {
+      upstream.send(
+        JSON.stringify({
+          setup: {
+            model: activeModel.startsWith("models/") ? activeModel : `models/${activeModel}`,
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName },
+                },
+              },
+            },
+            systemInstruction: {
+              parts: [{ text: buildMayaPrompt(state) }],
+            },
+            tools: [{ functionDeclarations: LIVE_FUNCTION_DECLARATIONS }],
+            inputAudioTranscription: {},
+            outputAudioTranscription: {},
+          },
+        })
+      );
+    } catch (err) {
+      failAndClose(
+        `Failed to initialize Gemini Live session: ${err?.message || String(err)}`,
+        "setup_send_failed"
+      );
+      return;
+    }
+
+    upstream.addEventListener("message", async (event) => {
+      if (closed || handedOff) return;
+      const rawText = decodeWsData(event.data, dec);
+      if (!rawText) return;
+
+      let msg;
+      try {
+        msg = JSON.parse(rawText);
+      } catch {
+        return;
+      }
+
+      if (msg.setupComplete) {
+        setupDone = true;
+        sendToClient({ type: "ready", callId: call.id, model: activeModel, voice: voiceName });
+        try {
+          upstream.send(
+            JSON.stringify({
+              clientContent: {
+                turns: [
+                  {
+                    role: "user",
+                    parts: [
+                      {
+                        text: `A visitor just connected to the Smile Masters & Jaw Joint Matters voice assistant (timezone: ${timezone}). Greet them warmly in 1–2 short spoken sentences as Maya and ask how you can help.`,
+                      },
+                    ],
+                  },
+                ],
+                turnComplete: true,
+              },
+            })
+          );
+        } catch {
+          /* ignore */
         }
-        if (part.text && !part.thought) {
-          appendTranscript("maya", part.text, false);
-          sendToClient({ type: "transcript", role: "maya", text: part.text, finished: false });
+        return;
+      }
+
+      const sc = msg.serverContent;
+      if (sc?.interrupted) {
+        sendToClient({ type: "interrupted" });
+      }
+
+      if (sc?.modelTurn?.parts) {
+        for (const part of sc.modelTurn.parts) {
+          if (part.inlineData?.data) {
+            sendToClient({
+              type: "audio",
+              mimeType: part.inlineData.mimeType || "audio/pcm;rate=24000",
+              data: part.inlineData.data,
+            });
+          }
+          if (part.text && !part.thought) {
+            appendTranscript("maya", part.text, false);
+            sendToClient({ type: "transcript", role: "maya", text: part.text, finished: false });
+          }
         }
       }
-    }
 
-    if (sc?.inputTranscription?.text) {
-      appendTranscript("caller", sc.inputTranscription.text, !sc.inputTranscription.finished);
-      sendToClient({
-        type: "transcript",
-        role: "caller",
-        text: sc.inputTranscription.text,
-        finished: Boolean(sc.inputTranscription.finished),
-      });
-    }
-
-    if (sc?.outputTranscription?.text) {
-      appendTranscript("maya", sc.outputTranscription.text, !sc.outputTranscription.finished);
-      sendToClient({
-        type: "transcript",
-        role: "maya",
-        text: sc.outputTranscription.text,
-        finished: Boolean(sc.outputTranscription.finished),
-      });
-    }
-
-    if (sc?.turnComplete) {
-      sendToClient({ type: "turnComplete" });
-    }
-
-    if (msg.toolCall?.functionCalls?.length) {
-      const functionResponses = [];
-      let endRequested = false;
-      for (const fc of msg.toolCall.functionCalls) {
-        let result;
-        try {
-          result = await runTool(fc.name, fc.args || {});
-        } catch (err) {
-          result = { ok: false, error: err?.message || String(err) };
-        }
-        sendToClient({ type: "tool", name: fc.name, result });
-        if (fc.name === "end_call") endRequested = true;
-        functionResponses.push({
-          id: fc.id,
-          name: fc.name,
-          response: { result },
+      if (sc?.inputTranscription?.text) {
+        appendTranscript("caller", sc.inputTranscription.text, !sc.inputTranscription.finished);
+        sendToClient({
+          type: "transcript",
+          role: "caller",
+          text: sc.inputTranscription.text,
+          finished: Boolean(sc.inputTranscription.finished),
         });
       }
-      upstream.send(JSON.stringify({ toolResponse: { functionResponses } }));
-      if (endRequested) {
-        setTimeout(() => closeBoth("maya_hangup"), 2500);
-      }
-    }
-  });
 
-  upstream.addEventListener("close", () => closeBoth("gemini_closed"));
-  upstream.addEventListener("error", () => {
-    sendToClient({ type: "error", message: "Voice connection interrupted." });
-    closeBoth("gemini_error");
-  });
+      if (sc?.outputTranscription?.text) {
+        appendTranscript("maya", sc.outputTranscription.text, !sc.outputTranscription.finished);
+        sendToClient({
+          type: "transcript",
+          role: "maya",
+          text: sc.outputTranscription.text,
+          finished: Boolean(sc.outputTranscription.finished),
+        });
+      }
+
+      if (sc?.turnComplete) {
+        sendToClient({ type: "turnComplete" });
+      }
+
+      if (msg.toolCall?.functionCalls?.length) {
+        const functionResponses = [];
+        let endRequested = false;
+        for (const fc of msg.toolCall.functionCalls) {
+          let result;
+          try {
+            result = await runTool(fc.name, fc.args || {});
+          } catch (err) {
+            result = { ok: false, error: err?.message || String(err) };
+          }
+          sendToClient({ type: "tool", name: fc.name, result });
+          if (fc.name === "end_call") endRequested = true;
+          functionResponses.push({
+            id: fc.id,
+            name: fc.name,
+            response: { result },
+          });
+        }
+        try {
+          upstream.send(JSON.stringify({ toolResponse: { functionResponses } }));
+        } catch {
+          /* ignore */
+        }
+        if (endRequested) {
+          setTimeout(() => closeBoth("maya_hangup"), 2500);
+        }
+      }
+    });
+
+    upstream.addEventListener("close", (ev) => {
+      if (closed || handedOff) return;
+      const code = ev?.code || 0;
+      const reason = ev?.reason || "";
+
+      // If the primary model is rejected by an external API key before setupComplete, retry with fallback.
+      if (
+        !setupDone &&
+        candidateIndex + 1 < modelCandidates.length &&
+        isModelUnsupportedClose(code, reason)
+      ) {
+        handedOff = true;
+        ctx.waitUntil(connectUpstream(candidateIndex + 1));
+        return;
+      }
+
+      if (!setupDone || (code && code !== 1000 && code !== 1001)) {
+        failAndClose(formatGeminiCloseError(code, reason, activeModel), "gemini_closed_error");
+        return;
+      }
+
+      closeBoth("gemini_closed");
+    });
+
+    upstream.addEventListener("error", () => {
+      if (closed || handedOff) return;
+      failAndClose(
+        "Voice connection to Google Gemini was interrupted. Please verify GEMINI_API_KEY and try again.",
+        "gemini_error"
+      );
+    });
+  };
 
   server.addEventListener("message", (event) => {
     if (closed) return;
+    const raw = decodeWsData(event.data, dec);
+    if (!raw) return;
     let msg;
     try {
-      msg = JSON.parse(typeof event.data === "string" ? event.data : dec.decode(event.data));
+      msg = JSON.parse(raw);
     } catch {
       return;
     }
 
+    if (msg.type === "end") {
+      closeBoth("client_end");
+      return;
+    }
+
+    // Never forward audio or text to Gemini Live before setupComplete.
+    if (!setupDone || !activeUpstream) return;
+
     if (msg.type === "audio" && typeof msg.data === "string" && msg.data.length > 0) {
-      upstream.send(
-        JSON.stringify({
-          realtimeInput: {
-            audio: {
-              data: msg.data,
-              mimeType: "audio/pcm;rate=16000",
+      try {
+        activeUpstream.send(
+          JSON.stringify({
+            realtimeInput: {
+              audio: {
+                data: msg.data,
+                mimeType: "audio/pcm;rate=16000",
+              },
             },
-          },
-        })
-      );
+          })
+        );
+      } catch {
+        /* ignore if closing */
+      }
     } else if (msg.type === "text" && typeof msg.text === "string" && msg.text.trim()) {
       const clean = msg.text.trim().slice(0, 600);
       appendTranscript("caller", clean, false);
       sendToClient({ type: "transcript", role: "caller", text: clean, finished: true });
-      upstream.send(
-        JSON.stringify({
-          clientContent: {
-            turns: [{ role: "user", parts: [{ text: clean }] }],
-            turnComplete: true,
-          },
-        })
-      );
-    } else if (msg.type === "end") {
-      closeBoth("client_end");
+      try {
+        activeUpstream.send(
+          JSON.stringify({
+            clientContent: {
+              turns: [{ role: "user", parts: [{ text: clean }] }],
+              turnComplete: true,
+            },
+          })
+        );
+      } catch {
+        /* ignore if closing */
+      }
     }
   });
 
   server.addEventListener("close", () => closeBoth("client_closed"));
   server.addEventListener("error", () => closeBoth("client_error"));
+
+  await connectUpstream(0);
 
   return new Response(null, { status: 101, webSocket: client });
 }
